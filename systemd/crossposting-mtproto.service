@@ -1,0 +1,21 @@
+[Unit]
+Description=Crossposting Service - MTProto Receiver
+After=network.target postgresql.service redis.service crossposting-bot.service
+Requires=postgresql.service redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/crossposting_service
+Environment="PATH=/root/crossposting_service/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/root/crossposting_service/venv/bin/python -m app.mtproto.main
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+
+

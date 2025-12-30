@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+
+# Database
+*.db
+*.sqlite
+
+# Logs
+*.log
+logs/
+
+# Telegram sessions
+*.session
+*.session-journal
+phone_code_hash.txt
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Alembic
+alembic.ini.bak
+
+# Media files
+media/temp/
+*.jpg
+*.png
+*.mp4
+*.pdf
+*.zip
+
+# Test files
+test_photo_sending.py
+photo_test_results.json
+test_session.session
+
+# Research and support files
+RESEARCH_RESULTS.md
+SUPPORT_REQUEST_MAX_API.md
+

@@ -1,0 +1,21 @@
+[Unit]
+Description=Crossposting Service - Telegram Bot Handler
+After=network.target postgresql.service redis.service
+Requires=postgresql.service redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/crossposting_service
+Environment="PATH=/root/crossposting_service/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/root/crossposting_service/venv/bin/python -m app.bot.main
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+
+
