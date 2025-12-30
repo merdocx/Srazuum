@@ -35,3 +35,6 @@ pytest-cov==4.1.0
 # pydantic устанавливается как зависимость aiogram
 # pydantic-settings не нужен, используем BaseSettings из pydantic
 
+# System monitoring
+psutil==5.9.6
+

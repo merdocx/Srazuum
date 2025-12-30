@@ -14,7 +14,13 @@ from config.settings import settings
 logger = get_logger(__name__)
 
 # Создаем директорию для медиа, если её нет
-MEDIA_STORAGE_PATH = Path(settings.media_storage_path)
+# Поддерживаем как абсолютные, так и относительные пути
+if settings.media_storage_path.startswith('/'):
+    MEDIA_STORAGE_PATH = Path(settings.media_storage_path)
+else:
+    # Относительный путь от корня проекта
+    PROJECT_ROOT = Path(__file__).parent.parent.parent
+    MEDIA_STORAGE_PATH = PROJECT_ROOT / settings.media_storage_path
 MEDIA_STORAGE_PATH.mkdir(parents=True, exist_ok=True)
 
 
@@ -108,31 +114,40 @@ async def download_and_store_media(
         raise MediaProcessingError(f"Ошибка загрузки {file_type}: {e}")
 
 
-async def delete_media_file(public_url: str) -> bool:
+async def delete_media_file(file_path_or_url: str) -> bool:
     """
-    Удалить медиа-файл по публичному URL.
+    Удалить медиа-файл по локальному пути или публичному URL.
     
     Args:
-        public_url: Публичный URL файла
+        file_path_or_url: Локальный путь к файлу или публичный URL
     
     Returns:
         True если файл удален, False в противном случае
     """
     try:
-        # Извлекаем имя файла из URL
-        filename = public_url.split('/')[-1]
-        file_path = MEDIA_STORAGE_PATH / filename
+        # Определяем, это URL или локальный путь
+        if file_path_or_url.startswith('http://') or file_path_or_url.startswith('https://'):
+            # Это URL - извлекаем имя файла
+            filename = file_path_or_url.split('/')[-1]
+            file_path = MEDIA_STORAGE_PATH / filename
+        else:
+            # Это локальный путь
+            if os.path.isabs(file_path_or_url):
+                file_path = Path(file_path_or_url)
+            else:
+                # Относительный путь - относительно MEDIA_STORAGE_PATH
+                file_path = MEDIA_STORAGE_PATH / file_path_or_url
         
         if file_path.exists():
             os.remove(file_path)
-            logger.info("media_deleted", file_path=str(file_path))
+            logger.info("media_file_deleted", file_path=str(file_path))
             return True
         else:
-            logger.warning("media_file_not_found", file_path=str(file_path))
+            logger.warning("media_file_not_found_for_deletion", file_path=str(file_path))
             return False
     
     except Exception as e:
-        logger.error("media_delete_error", public_url=public_url, error=str(e))
+        logger.error("media_deletion_error", file_path=file_path_or_url, error=str(e))
         return False
 
 

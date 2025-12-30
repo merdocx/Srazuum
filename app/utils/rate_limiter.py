@@ -4,6 +4,7 @@ import time
 from typing import Dict, Optional
 from collections import defaultdict
 from app.utils.logger import get_logger
+from app.utils.metrics import metrics_collector
 
 logger = get_logger(__name__)
 
@@ -43,6 +44,10 @@ class RateLimiter:
             ]
             
             if len(self.calls[key]) >= self.max_calls:
+                # Записываем метрику rate limit hit
+                if metrics_collector.enabled:
+                    metrics_collector.record_timing(f"rate_limit_hit_{key}", 0, success=False)
+                
                 logger.warning(
                     "rate_limit_exceeded",
                     key=key,

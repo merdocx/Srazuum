@@ -24,7 +24,7 @@ class MaxAPIClient:
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
             headers=self.headers,
-            timeout=30.0,
+            timeout=settings.max_api_timeout,
         )
     
     async def close(self):
@@ -81,17 +81,7 @@ class MaxAPIClient:
             Информация об отправленном сообщении
         """
         # Преобразуем chat_id в правильный формат для query parameter
-        # Если это строка с числом, пробуем преобразовать в int
-        try:
-            # Пробуем преобразовать в int, если это числовая строка
-            if isinstance(chat_id, str) and (chat_id.lstrip('-').isdigit() or chat_id.lstrip('-').replace('.', '').isdigit()):
-                chat_id_value = int(float(chat_id))
-            elif isinstance(chat_id, (int, float)):
-                chat_id_value = int(chat_id)
-            else:
-                chat_id_value = chat_id
-        except (ValueError, TypeError):
-            chat_id_value = chat_id
+        chat_id_value = convert_chat_id(chat_id)
         
         # В MAX API chat_id передается как query parameter, а не в теле запроса!
         # Формат: POST /messages?chat_id={chat_id}
@@ -179,7 +169,7 @@ class MaxAPIClient:
                 content_type = content_type_map.get(file_type, "application/octet-stream")
                 
                 files = {"data": (file.name, f, content_type)}
-                upload_client = httpx.AsyncClient(timeout=120.0)  # Увеличиваем таймаут для видео
+                upload_client = httpx.AsyncClient(timeout=settings.max_api_upload_timeout)
                 try:
                     upload_file_response = await upload_client.post(
                         upload_url,
@@ -323,9 +313,8 @@ class MaxAPIClient:
             try:
                 token = await self.upload_file(local_file_path, "image")
                 
-                # Добавляем задержку после загрузки (рекомендуется в документации)
-                # для обработки файла на сервере MAX
-                await asyncio.sleep(2)
+                # Адаптивная задержка после загрузки
+                await asyncio.sleep(settings.media_processing_delay_photo)
                 
                 # Формируем запрос с attachments и payload.token
                 # ПРАВИЛЬНЫЙ ФОРМАТ: {"attachments": [{"type": "image", "payload": {"token": "..."}}]}
@@ -494,8 +483,8 @@ class MaxAPIClient:
             try:
                 token = await self.upload_file(local_file_path, "video")
                 
-                # Для видео требуется больше времени на обработку
-                await asyncio.sleep(3)
+                # Адаптивная задержка для видео
+                await asyncio.sleep(settings.media_processing_delay_video)
                 
                 # Формируем запрос с attachments и payload.token
                 text = caption or ""  # Пустая строка, если нет caption
@@ -655,16 +644,27 @@ class MaxAPIClient:
             chat_id_value = chat_id
         
         try:
-            # Загружаем все фото и получаем токены
+            # Батчинг загрузок медиа
             tokens = []
-            for file_path in local_file_paths:
-                token = await self.upload_file(file_path, "image")
-                tokens.append(token)
-                # Небольшая задержка между загрузками
-                await asyncio.sleep(0.5)
+            batch_size = settings.batch_size_media_uploads
+            for i in range(0, len(local_file_paths), batch_size):
+                batch = local_file_paths[i:i + batch_size]
+                # Параллельная загрузка батча
+                batch_tokens = await asyncio.gather(*[
+                    self.upload_file(file_path, "image")
+                    for file_path in batch
+                ])
+                tokens.extend(batch_tokens)
+                # Адаптивная задержка между батчами
+                if i + batch_size < len(local_file_paths):
+                    await asyncio.sleep(settings.media_upload_delay_photo)
             
-            # Ждем обработки всех файлов
-            await asyncio.sleep(2)
+            # Адаптивная задержка обработки (зависит от количества файлов)
+            processing_delay = min(
+                settings.media_processing_delay_photo * (1 + len(tokens) * 0.1),
+                10.0  # Максимум 10 секунд
+            )
+            await asyncio.sleep(processing_delay)
             
             # Формируем запрос с массивом attachments
             text = caption or ""  # Пустая строка, если нет caption
@@ -778,16 +778,27 @@ class MaxAPIClient:
             chat_id_value = chat_id
         
         try:
-            # Загружаем все видео и получаем токены
+            # Батчинг загрузок медиа
             tokens = []
-            for file_path in local_file_paths:
-                token = await self.upload_file(file_path, "video")
-                tokens.append(token)
-                # Небольшая задержка между загрузками (для видео больше)
-                await asyncio.sleep(1)
+            batch_size = settings.batch_size_media_uploads
+            for i in range(0, len(local_file_paths), batch_size):
+                batch = local_file_paths[i:i + batch_size]
+                # Параллельная загрузка батча
+                batch_tokens = await asyncio.gather(*[
+                    self.upload_file(file_path, "video")
+                    for file_path in batch
+                ])
+                tokens.extend(batch_tokens)
+                # Адаптивная задержка между батчами (для видео больше)
+                if i + batch_size < len(local_file_paths):
+                    await asyncio.sleep(settings.media_upload_delay_video)
             
-            # Ждем обработки всех файлов (для видео дольше)
-            await asyncio.sleep(3)
+            # Адаптивная задержка обработки (зависит от количества файлов)
+            processing_delay = min(
+                settings.media_processing_delay_video * (1 + len(tokens) * 0.15),
+                15.0  # Максимум 15 секунд для видео
+            )
+            await asyncio.sleep(processing_delay)
             
             # Формируем запрос с массивом attachments
             text = caption or ""  # Пустая строка, если нет caption

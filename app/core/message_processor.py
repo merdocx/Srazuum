@@ -1,8 +1,8 @@
 """Обработчик сообщений для кросспостинга."""
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 import httpx
 import asyncio
@@ -14,12 +14,22 @@ from app.max_api.client import MaxAPIClient
 from app.utils.logger import get_logger
 from app.utils.cache import get_cache, set_cache, delete_cache
 from app.utils.enums import MessageStatus, MessageType
-from app.utils.exceptions import APIError, DatabaseError
+from app.utils.exceptions import APIError, DatabaseError, MediaProcessingError
 from app.utils.rate_limiter import max_api_limiter
+from app.utils.circuit_breaker import CircuitBreaker
+from app.utils.metrics import metrics_collector, record_operation_time
+from app.utils.chat_id_converter import convert_chat_id
 from config.database import async_session_maker
 from config.settings import settings
 
 logger = get_logger(__name__)
+
+# Circuit breaker для MAX API
+max_api_circuit_breaker = CircuitBreaker(
+    failure_threshold=settings.circuit_breaker_failure_threshold,
+    recovery_timeout=settings.circuit_breaker_recovery_timeout,
+    expected_exception=APIError
+)
 
 
 class MessageProcessor:
@@ -136,22 +146,28 @@ class MessageProcessor:
                             continue
                     
                     # Коммитим все логи одной транзакцией
-                    # Теперь обрабатываем отправку сообщений вне транзакции
-                    for link, message_log in message_logs:
+                    # Теперь обрабатываем отправку сообщений параллельно
+                    async def process_link(link: CrosspostingLink, message_log: MessageLog) -> Tuple[int, Optional[Dict], Optional[str], int]:
+                        """Обработать одну связь."""
+                        link_start_time = datetime.utcnow()
                         try:
                             # Rate limiting
                             await max_api_limiter.wait_if_needed(f"max_api_{link.max_channel.channel_id}")
                             
-                            max_message = await self._send_to_max(link, message_data)
+                            # Используем circuit breaker с таймаутом
+                            try:
+                                max_message = await asyncio.wait_for(
+                                    max_api_circuit_breaker.call(
+                                        self._send_to_max,
+                                        link,
+                                        message_data
+                                    ),
+                                    timeout=settings.max_api_timeout
+                                )
+                            except asyncio.TimeoutError:
+                                raise APIError(f"Таймаут при отправке в MAX API (>{settings.max_api_timeout}с)")
                             
-                            # Обновление лога в новой транзакции
-                            async with async_session_maker() as update_session:
-                                async with update_session.begin():
-                                    await update_session.merge(message_log)
-                                    message_log.status = MessageStatus.SUCCESS.value
-                                    message_log.max_message_id = str(max_message.get("message_id", ""))
-                                    message_log.sent_at = datetime.utcnow()
-                                    message_log.processing_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+                            processing_time = int((datetime.utcnow() - link_start_time).total_seconds() * 1000)
                             
                             logger.info(
                                 "message_processed",
@@ -159,32 +175,88 @@ class MessageProcessor:
                                 telegram_message_id=telegram_message_id,
                                 max_message_id=max_message.get("message_id")
                             )
-                            success_count += 1
                             
-                        except APIError as e:
-                            # Обработка ошибок API
+                            return (link.id, max_message, None, processing_time)
+                            
+                        except (APIError, httpx.HTTPStatusError, httpx.RequestError, asyncio.TimeoutError) as e:
+                            # Конкретные исключения для API ошибок
+                            error_msg = str(e)
+                            processing_time = int((datetime.utcnow() - link_start_time).total_seconds() * 1000)
                             await self._handle_send_error(
                                 link.id,
                                 telegram_message_id,
                                 message_log,
-                                str(e),
-                                start_time
+                                error_msg,
+                                link_start_time
                             )
+                            return (link.id, None, error_msg, processing_time)
+                        except (DatabaseError, MediaProcessingError) as e:
+                            # Конкретные исключения для внутренних ошибок
+                            error_msg = str(e)
+                            processing_time = int((datetime.utcnow() - link_start_time).total_seconds() * 1000)
+                            await self._handle_send_error(
+                                link.id,
+                                telegram_message_id,
+                                message_log,
+                                error_msg,
+                                link_start_time
+                            )
+                            return (link.id, None, error_msg, processing_time)
                         except Exception as e:
-                            # Обработка других ошибок
+                            # Неожиданные ошибки
+                            error_msg = f"Неожиданная ошибка: {str(e)}"
+                            processing_time = int((datetime.utcnow() - link_start_time).total_seconds() * 1000)
+                            logger.error(
+                                "unexpected_error_processing_link",
+                                link_id=link.id,
+                                error=str(e),
+                                exc_info=True
+                            )
                             await self._handle_send_error(
                                 link.id,
                                 telegram_message_id,
                                 message_log,
-                                str(e),
-                                start_time
+                                error_msg,
+                                link_start_time
                             )
+                            return (link.id, None, error_msg, processing_time)
+                    
+                    # Параллельная обработка всех связей
+                    results = await asyncio.gather(*[
+                        process_link(link, message_log)
+                        for link, message_log in message_logs
+                    ], return_exceptions=True)
+                    
+                    # Batch update для всех успешных сообщений
+                    success_updates = []
+                    for result in results:
+                        if isinstance(result, Exception):
+                            logger.error("error_in_parallel_processing", error=str(result), exc_info=True)
+                            continue
+                        
+                        link_id, max_message, error_msg, processing_time = result
+                        
+                        if max_message:
+                            message_log = next(ml for l, ml in message_logs if l.id == link_id)
+                            success_updates.append({
+                                "message_log_id": message_log.id,
+                                "max_message_id": str(max_message.get("message_id", "")),
+                                "processing_time": processing_time
+                            })
+                            success_count += 1
+                    
+                    # Batch update для всех успешных обновлений
+                    if success_updates:
+                        await self._batch_update_message_logs(success_updates, start_time)
                     
                     return success_count > 0
                 
-                except Exception as e:
-                    logger.error("message_processing_critical_error", error=str(e))
+                except (DatabaseError, ValueError, TypeError) as e:
+                    logger.error("message_processing_critical_error", error=str(e), exc_info=True)
                     raise DatabaseError(f"Критическая ошибка обработки сообщения: {e}")
+                except Exception as e:
+                    logger.error("message_processing_unexpected_error", error=str(e), exc_info=True)
+                    raise DatabaseError(f"Неожиданная ошибка обработки сообщения: {e}")
     
     async def _handle_send_error(
         self,
@@ -217,6 +289,7 @@ class MessageProcessor:
             error=error_message
         )
     
+    @record_operation_time("send_to_max")
     async def _send_to_max(
         self,
         link: CrosspostingLink,
@@ -266,11 +339,15 @@ class MessageProcessor:
                         local_file_path=local_file_path,
                         parse_mode=caption_parse_mode
                     )
-                    # Удаляем файл после успешной отправки
+                    # Удаляем файл после успешной отправки (ДО return)
                     if local_file_path:
                         from app.utils.media_handler import delete_media_file
-                        await delete_media_file(local_file_path)
-                        logger.info("media_file_deleted_after_send", file_path=local_file_path)
+                        try:
+                            await delete_media_file(local_file_path)
+                            logger.info("media_file_deleted_after_send", file_path=local_file_path)
+                        except Exception as delete_error:
+                            # Логируем ошибку удаления, но не прерываем процесс
+                            logger.warning("failed_to_delete_media_after_send", file_path=local_file_path, error=str(delete_error))
                     return result
                 except Exception as e:
                     # В случае ошибки не удаляем файл сразу, он будет удален при очистке
@@ -292,22 +369,26 @@ class MessageProcessor:
                         parse_mode=parse_mode
                     )
                 
-                try:
-                    result = await self.max_client.send_video(
-                        chat_id=max_channel_id,
-                        video_url=video_url,
-                        caption=caption,
-                        local_file_path=local_file_path,
-                        parse_mode=parse_mode
-                    )
-                    # Удаляем файл после успешной отправки
-                    if local_file_path:
-                        await delete_media_file(local_file_path)
-                        logger.info("video_file_deleted_after_send", file_path=local_file_path)
-                    return result
-                except Exception as e:
-                    logger.warning("failed_to_send_video_keeping_file", error=str(e), video_url=video_url)
-                    raise
+                    try:
+                        result = await self.max_client.send_video(
+                            chat_id=max_channel_id,
+                            video_url=video_url,
+                            caption=caption,
+                            local_file_path=local_file_path,
+                            parse_mode=parse_mode
+                        )
+                        # Удаляем файл после успешной отправки (ДО return)
+                        if local_file_path:
+                            try:
+                                await delete_media_file(local_file_path)
+                                logger.info("video_file_deleted_after_send", file_path=local_file_path)
+                            except Exception as delete_error:
+                                # Логируем ошибку удаления, но не прерываем процесс
+                                logger.warning("failed_to_delete_video_after_send", file_path=local_file_path, error=str(delete_error))
+                        return result
+                    except Exception as e:
+                        logger.warning("failed_to_send_video_keeping_file", error=str(e), video_url=video_url)
+                        raise
             else:
                 # Для других типов отправляем как текст с указанием типа
                 text = message_data.get("text", message_data.get("caption", "")) or f"[{message_type}]"
@@ -710,10 +791,14 @@ class MessageProcessor:
                             videos_count=len(local_paths)
                         )
                     
-                    # Удаляем файлы после успешной отправки
+                    # Удаляем файлы после успешной отправки (ДО выхода из try блока)
                     for media_item in media_data:
                         if media_item.get("local_file_path"):
-                            await delete_media_file(media_item["local_file_path"])
+                            try:
+                                await delete_media_file(media_item["local_file_path"])
+                            except Exception as delete_error:
+                                # Логируем ошибку удаления, но не прерываем процесс
+                                logger.warning("failed_to_delete_media_in_group", file_path=media_item["local_file_path"], error=str(delete_error))
                     
                 except Exception as e:
                     logger.error(
@@ -786,7 +871,7 @@ class MessageProcessor:
                                         "token": token
                                     }
                                 })
-                                await asyncio.sleep(0.5)  # Небольшая задержка между загрузками
+                                await asyncio.sleep(settings.media_upload_delay_photo)
                             except Exception as e:
                                 logger.error("failed_to_upload_photo_in_mixed_group", error=str(e))
                     
@@ -802,7 +887,7 @@ class MessageProcessor:
                                         "token": token
                                     }
                                 })
-                                await asyncio.sleep(1)  # Больше задержка для видео
+                                await asyncio.sleep(settings.media_upload_delay_video)
                             except Exception as e:
                                 logger.error("failed_to_upload_video_in_mixed_group", error=str(e))
                     
@@ -810,8 +895,12 @@ class MessageProcessor:
                         logger.warning("no_attachments_in_mixed_group")
                         continue
                     
-                    # Ждем обработки всех файлов
-                    await asyncio.sleep(3)
+                    # Адаптивная задержка обработки
+                    processing_delay = min(
+                        settings.media_processing_delay_video * (1 + len(attachments) * 0.1),
+                        10.0
+                    )
+                    await asyncio.sleep(processing_delay)
                     
                     # Формируем запрос с массивом attachments (фото + видео)
                     text = album_caption or ""
@@ -892,13 +981,21 @@ class MessageProcessor:
                             await asyncio.sleep(retry_delay)
                             retry_delay *= 2
                     
-                    # Удаляем файлы после успешной отправки
+                    # Удаляем файлы после успешной отправки (ДО выхода из try блока)
                     for photo_data in photos_data:
                         if photo_data.get("local_file_path"):
-                            await delete_media_file(photo_data["local_file_path"])
+                            try:
+                                await delete_media_file(photo_data["local_file_path"])
+                            except Exception as delete_error:
+                                # Логируем ошибку удаления, но не прерываем процесс
+                                logger.warning("failed_to_delete_photo_in_mixed_group", file_path=photo_data["local_file_path"], error=str(delete_error))
                     for video_data in videos_data:
                         if video_data.get("local_file_path"):
-                            await delete_media_file(video_data["local_file_path"])
+                            try:
+                                await delete_media_file(video_data["local_file_path"])
+                            except Exception as delete_error:
+                                # Логируем ошибку удаления, но не прерываем процесс
+                                logger.warning("failed_to_delete_video_in_mixed_group", file_path=video_data["local_file_path"], error=str(delete_error))
                     
                 except Exception as e:
                     logger.error(

@@ -65,12 +65,12 @@ media/temp/
 *.pdf
 *.zip
 
-# Test files
-test_photo_sending.py
-photo_test_results.json
-test_session.session
+# Test files (удалены, больше не нужны)
+# test_photo_sending.py
+# photo_test_results.json
+# test_session.session
 
-# Research and support files
-RESEARCH_RESULTS.md
-SUPPORT_REQUEST_MAX_API.md
+# Research and support files (удалены, больше не нужны)
+# RESEARCH_RESULTS.md
+# SUPPORT_REQUEST_MAX_API.md
 

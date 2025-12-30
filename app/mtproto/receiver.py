@@ -16,6 +16,8 @@ class MTProtoReceiver:
     def __init__(self):
         self.client = None
         self.message_processor = None
+        self.cleanup_task = None
+        self.metrics_task = None
         self._running = False
     
     async def start(self, session_string: str = None):
@@ -57,6 +59,15 @@ class MTProtoReceiver:
             # Инициализируем обработчик сообщений
             self.message_processor = MessageProcessor()
             
+            # Запускаем периодическую очистку медиа-файлов
+            from app.utils.media_cleanup import periodic_media_cleanup
+            self.cleanup_task = asyncio.create_task(periodic_media_cleanup())
+            
+            # Запускаем периодический экспорт метрик
+            if settings.enable_metrics:
+                from app.utils.metrics import metrics_collector
+                self.metrics_task = asyncio.create_task(self._periodic_metrics_export())
+            
             # Добавляем обработчик сообщений из каналов
             self.client.add_handler(
                 MessageHandler(
@@ -96,12 +107,54 @@ class MTProtoReceiver:
         logger.info("Остановка MTProto Receiver...")
         self._running = False
         
+        # Останавливаем задачу очистки
+        if self.cleanup_task:
+            try:
+                self.cleanup_task.cancel()
+                await self.cleanup_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(f"Ошибка при остановке задачи очистки: {e}")
+        
+        # Останавливаем задачу экспорта метрик
+        if self.metrics_task:
+            try:
+                self.metrics_task.cancel()
+                await self.metrics_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(f"Ошибка при остановке задачи метрик: {e}")
+        
         if self.client:
             try:
                 await self.client.stop()
                 logger.info("MTProto Receiver остановлен")
             except Exception as e:
                 logger.warning(f"Ошибка при остановке клиента: {e}")
+    
+    async def _periodic_metrics_export(self):
+        """Периодический экспорт метрик."""
+        from app.utils.metrics import metrics_collector
+        from config.settings import settings
+        
+        while self._running:
+            try:
+                await asyncio.sleep(settings.metrics_export_interval)
+                
+                if metrics_collector.enabled:
+                    all_metrics = metrics_collector.get_all_metrics()
+                    metrics_collector.log_summary()
+                    
+                    # Логируем системные метрики отдельно
+                    if all_metrics.get("system"):
+                        logger.info("system_metrics", **all_metrics["system"])
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("metrics_export_error", error=str(e))
+                await asyncio.sleep(60)  # Короткая пауза при ошибке
     
     async def run(self):
         """Запуск и работа в бесконечном цикле."""
