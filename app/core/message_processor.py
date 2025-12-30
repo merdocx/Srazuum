@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 import httpx
+import asyncio
 
 from app.models.crossposting_link import CrosspostingLink
 from app.models.message_log import MessageLog
@@ -276,19 +277,37 @@ class MessageProcessor:
                     logger.warning("failed_to_send_photo_keeping_file", error=str(e), photo_url=photo_url)
                     raise
             elif message_type == MessageType.VIDEO.value:
+                from app.utils.media_handler import delete_media_file
                 video_url = message_data.get("video_url")
-                if not video_url:
+                local_file_path = message_data.get("local_file_path")
+                caption = message_data.get("caption")
+                parse_mode = message_data.get("parse_mode")
+                
+                if not local_file_path:
+                    # Fallback: отправляем текст, если не удалось скачать видео
                     text = message_data.get("text", message_data.get("caption", "")) or "[Видео]"
                     return await self.max_client.send_message(
                         chat_id=max_channel_id,
-                        text=text
+                        text=text,
+                        parse_mode=parse_mode
                     )
-                # TODO: Реализовать send_video когда будет доступно в MAX API
-                caption = message_data.get("caption")
-                return await self.max_client.send_message(
-                    chat_id=max_channel_id,
-                    text=f"[Видео]\n{caption}" if caption else "[Видео]"
-                )
+                
+                try:
+                    result = await self.max_client.send_video(
+                        chat_id=max_channel_id,
+                        video_url=video_url,
+                        caption=caption,
+                        local_file_path=local_file_path,
+                        parse_mode=parse_mode
+                    )
+                    # Удаляем файл после успешной отправки
+                    if local_file_path:
+                        await delete_media_file(local_file_path)
+                        logger.info("video_file_deleted_after_send", file_path=local_file_path)
+                    return result
+                except Exception as e:
+                    logger.warning("failed_to_send_video_keeping_file", error=str(e), video_url=video_url)
+                    raise
             else:
                 # Для других типов отправляем как текст с указанием типа
                 text = message_data.get("text", message_data.get("caption", "")) or f"[{message_type}]"
@@ -376,16 +395,39 @@ class MessageProcessor:
                 logger.warning("no_client_for_photo_download", chat_id=message.chat.id if message.chat else None)
                 message_data["photo_url"] = None
         elif message.video:
+            logger.info("processing_video_message", chat_id=message.chat.id if message.chat else None)
             message_data["type"] = MessageType.VIDEO.value
-            message_data["caption"] = message.caption
+            # Обрабатываем форматирование caption, если есть
+            if message.caption_entities:
+                from app.utils.text_formatter import apply_formatting
+                formatted_caption, caption_parse_mode = apply_formatting(
+                    message.caption or "",
+                    message.caption_entities
+                )
+                message_data["caption"] = formatted_caption
+                message_data["parse_mode"] = caption_parse_mode
+            else:
+                message_data["caption"] = message.caption
             if client:
                 try:
-                    message_data["video_url"] = await get_media_url(client, message)
+                    # Скачиваем видео и получаем публичный URL и локальный путь
+                    logger.info("downloading_video_start", chat_id=message.chat.id if message.chat else None)
+                    video_url, local_file_path = await download_and_store_media(client, message, "video")
+                    if video_url and local_file_path:
+                        logger.info("video_downloaded", video_url=video_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
+                        message_data["video_url"] = video_url
+                        message_data["local_file_path"] = local_file_path
+                    else:
+                        logger.warning("video_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
+                        message_data["video_url"] = None
+                        message_data["local_file_path"] = None
                 except Exception as e:
-                    logger.warning("failed_to_get_video_url", error=str(e))
+                    logger.error("failed_to_get_video_url", error=str(e), exc_info=True)
                     message_data["video_url"] = None
+                    message_data["local_file_path"] = None
             else:
                 message_data["video_url"] = None
+                message_data["local_file_path"] = None
         elif message.document:
             message_data["type"] = MessageType.DOCUMENT.value
             message_data["caption"] = message.caption
@@ -509,30 +551,31 @@ class MessageProcessor:
             
             telegram_channel_id = telegram_channel.id
         
-        # Собираем все фото из группы
+        # Собираем все медиа из группы (фото и видео)
         photos_data = []
+        videos_data = []
         caption = None
         caption_parse_mode = None
         text = ""
         
         for msg in messages:
+            # Получаем caption (обычно только у первого сообщения)
+            if msg.caption and not caption:
+                caption = msg.caption
+                # Обрабатываем форматирование caption, если есть
+                if msg.caption_entities:
+                    from app.utils.text_formatter import apply_formatting
+                    formatted_caption, parse_mode = apply_formatting(
+                        msg.caption or "",
+                        msg.caption_entities
+                    )
+                    caption = formatted_caption
+                    caption_parse_mode = parse_mode
+            if msg.text and not text:
+                text = msg.text
+            
+            # Обрабатываем фото
             if msg.photo:
-                # Получаем caption (обычно только у первого сообщения)
-                if msg.caption and not caption:
-                    caption = msg.caption
-                    # Обрабатываем форматирование caption, если есть
-                    if msg.caption_entities:
-                        from app.utils.text_formatter import apply_formatting
-                        formatted_caption, parse_mode = apply_formatting(
-                            msg.caption or "",
-                            msg.caption_entities
-                        )
-                        caption = formatted_caption
-                        caption_parse_mode = parse_mode
-                if msg.text and not text:
-                    text = msg.text
-                
-                # Скачиваем фото
                 try:
                     public_url, local_path = await download_and_store_media(
                         client,
@@ -546,18 +589,73 @@ class MessageProcessor:
                         })
                 except Exception as e:
                     logger.error("failed_to_download_photo_from_group", error=str(e))
+            
+            # Обрабатываем видео
+            elif msg.video:
+                try:
+                    public_url, local_path = await download_and_store_media(
+                        client,
+                        msg,
+                        "video"
+                    )
+                    if local_path:
+                        videos_data.append({
+                            "local_file_path": local_path,
+                            "public_url": public_url
+                        })
+                except Exception as e:
+                    logger.error("failed_to_download_video_from_group", error=str(e))
         
-        if not photos_data:
-            logger.warning("no_photos_in_media_group")
+        # Определяем тип группы и обрабатываем соответственно
+        if photos_data and not videos_data:
+            # Только фото - отправляем как альбом фото
+            media_type = "photos"
+            media_data = photos_data
+        elif videos_data and not photos_data:
+            # Только видео - отправляем как альбом видео
+            media_type = "videos"
+            media_data = videos_data
+        elif photos_data and videos_data:
+            # Смешанная группа - отправляем все медиа одним сообщением
+            logger.info("mixed_media_group", photos_count=len(photos_data), videos_count=len(videos_data))
+            await self._send_mixed_media_group(telegram_channel_id, photos_data, videos_data, caption, caption_parse_mode, client)
+            return
+        else:
+            logger.warning("no_media_in_media_group")
             return
         
         logger.info(
             "processing_media_group",
-            photos_count=len(photos_data),
+            media_type=media_type,
+            media_count=len(media_data),
             channel_id=telegram_chat_id
         )
         
-        # Отправляем все фото одним сообщением
+        # Отправляем группу медиа
+        await self._send_media_group(telegram_channel_id, media_data, media_type, caption, caption_parse_mode, client)
+    
+    async def _send_media_group(
+        self,
+        telegram_channel_id: int,
+        media_data: List[Dict[str, str]],
+        media_type: str,
+        caption: Optional[str],
+        caption_parse_mode: Optional[str],
+        client
+    ):
+        """
+        Отправить группу медиа (фото или видео) в MAX.
+        
+        Args:
+            telegram_channel_id: ID Telegram канала в БД
+            media_data: Список словарей с local_file_path и public_url
+            media_type: "photos" или "videos"
+            caption: Подпись к группе
+            caption_parse_mode: Режим форматирования подписи
+            client: Pyrogram клиент
+        """
+        from app.utils.media_handler import delete_media_file
+        
         try:
             # Получаем связи для кросспостинга
             async with async_session_maker() as session:
@@ -570,7 +668,7 @@ class MessageProcessor:
                 links = result.scalars().all()
             
             if not links:
-                logger.debug("no_active_links_for_media_group", channel_id=telegram_chat_id)
+                logger.debug("no_active_links_for_media_group", channel_id=telegram_channel_id)
                 return
             
             # Отправляем в каждый MAX канал
@@ -579,37 +677,238 @@ class MessageProcessor:
                     max_channel_id = link.max_channel.channel_id
                     
                     # Используем caption или text как подпись
-                    album_caption = caption or text or ""
+                    album_caption = caption or ""
                     
-                    # Отправляем альбом
-                    local_paths = [photo["local_file_path"] for photo in photos_data]
-                    result = await self.max_client.send_photos(
-                        chat_id=max_channel_id,
-                        local_file_paths=local_paths,
-                        caption=album_caption,
-                        parse_mode=caption_parse_mode
-                    )
-                    
-                    logger.info(
-                        "media_group_sent",
-                        max_channel_id=max_channel_id,
-                        photos_count=len(local_paths)
-                    )
+                    if media_type == "photos":
+                        # Отправляем альбом фото
+                        local_paths = [media["local_file_path"] for media in media_data]
+                        result = await self.max_client.send_photos(
+                            chat_id=max_channel_id,
+                            local_file_paths=local_paths,
+                            caption=album_caption,
+                            parse_mode=caption_parse_mode
+                        )
+                        
+                        logger.info(
+                            "photos_group_sent",
+                            max_channel_id=max_channel_id,
+                            photos_count=len(local_paths)
+                        )
+                    elif media_type == "videos":
+                        # Отправляем альбом видео
+                        local_paths = [media["local_file_path"] for media in media_data]
+                        result = await self.max_client.send_videos(
+                            chat_id=max_channel_id,
+                            local_file_paths=local_paths,
+                            caption=album_caption,
+                            parse_mode=caption_parse_mode
+                        )
+                        
+                        logger.info(
+                            "videos_group_sent",
+                            max_channel_id=max_channel_id,
+                            videos_count=len(local_paths)
+                        )
                     
                     # Удаляем файлы после успешной отправки
-                    for photo_data in photos_data:
-                        if photo_data.get("local_file_path"):
-                            await delete_media_file(photo_data["local_file_path"])
+                    for media_item in media_data:
+                        if media_item.get("local_file_path"):
+                            await delete_media_file(media_item["local_file_path"])
                     
                 except Exception as e:
                     logger.error(
                         "failed_to_send_media_group",
                         max_channel_id=link.max_channel.channel_id,
+                        media_type=media_type,
                         error=str(e)
                     )
         
         except Exception as e:
-            logger.error("media_group_processing_error", error=str(e), exc_info=True)
+            logger.error("media_group_send_error", media_type=media_type, error=str(e), exc_info=True)
+    
+    async def _send_mixed_media_group(
+        self,
+        telegram_channel_id: int,
+        photos_data: List[Dict[str, str]],
+        videos_data: List[Dict[str, str]],
+        caption: Optional[str],
+        caption_parse_mode: Optional[str],
+        client
+    ):
+        """
+        Отправить смешанную группу медиа (фото + видео) одним сообщением в MAX.
+        
+        Args:
+            telegram_channel_id: ID Telegram канала в БД
+            photos_data: Список словарей с данными фото
+            videos_data: Список словарей с данными видео
+            caption: Подпись к группе
+            caption_parse_mode: Режим форматирования подписи
+            client: Pyrogram клиент
+        """
+        from app.utils.media_handler import delete_media_file
+        
+        try:
+            # Получаем связи для кросспостинга
+            async with async_session_maker() as session:
+                result = await session.execute(
+                    select(CrosspostingLink)
+                    .where(CrosspostingLink.telegram_channel_id == telegram_channel_id)
+                    .where(CrosspostingLink.is_enabled == True)
+                    .options(selectinload(CrosspostingLink.max_channel))
+                )
+                links = result.scalars().all()
+            
+            if not links:
+                logger.debug("no_active_links_for_mixed_media_group", channel_id=telegram_channel_id)
+                return
+            
+            # Отправляем в каждый MAX канал
+            for link in links:
+                try:
+                    max_channel_id = link.max_channel.channel_id
+                    
+                    # Используем caption или text как подпись
+                    album_caption = caption or ""
+                    
+                    # Загружаем все медиа и получаем токены
+                    attachments = []
+                    
+                    # Загружаем фото
+                    for photo_data in photos_data:
+                        local_path = photo_data.get("local_file_path")
+                        if local_path:
+                            try:
+                                token = await self.max_client.upload_file(local_path, "image")
+                                attachments.append({
+                                    "type": "image",
+                                    "payload": {
+                                        "token": token
+                                    }
+                                })
+                                await asyncio.sleep(0.5)  # Небольшая задержка между загрузками
+                            except Exception as e:
+                                logger.error("failed_to_upload_photo_in_mixed_group", error=str(e))
+                    
+                    # Загружаем видео
+                    for video_data in videos_data:
+                        local_path = video_data.get("local_file_path")
+                        if local_path:
+                            try:
+                                token = await self.max_client.upload_file(local_path, "video")
+                                attachments.append({
+                                    "type": "video",
+                                    "payload": {
+                                        "token": token
+                                    }
+                                })
+                                await asyncio.sleep(1)  # Больше задержка для видео
+                            except Exception as e:
+                                logger.error("failed_to_upload_video_in_mixed_group", error=str(e))
+                    
+                    if not attachments:
+                        logger.warning("no_attachments_in_mixed_group")
+                        continue
+                    
+                    # Ждем обработки всех файлов
+                    await asyncio.sleep(3)
+                    
+                    # Формируем запрос с массивом attachments (фото + видео)
+                    text = album_caption or ""
+                    data = {
+                        "text": text,
+                        "attachments": attachments
+                    }
+                    if caption_parse_mode:
+                        data["format"] = caption_parse_mode
+                    
+                    # Преобразуем chat_id
+                    try:
+                        if isinstance(max_channel_id, str) and (max_channel_id.lstrip('-').isdigit() or max_channel_id.lstrip('-').replace('.', '').isdigit()):
+                            chat_id_value = int(float(max_channel_id))
+                        elif isinstance(max_channel_id, (int, float)):
+                            chat_id_value = int(max_channel_id)
+                        else:
+                            chat_id_value = max_channel_id
+                    except (ValueError, TypeError):
+                        chat_id_value = max_channel_id
+                    
+                    # Отправляем смешанную группу
+                    from app.utils.rate_limiter import max_api_limiter
+                    from app.utils.retry import retry_with_backoff
+                    
+                    await max_api_limiter.wait_if_needed(f"max_api_{max_channel_id}")
+                    
+                    max_retries = 5
+                    retry_delay = 3
+                    
+                    for attempt in range(max_retries):
+                        try:
+                            response = await retry_with_backoff(
+                                self.max_client.client.post,
+                                f"/messages?chat_id={chat_id_value}",
+                                json=data
+                            )
+                            response.raise_for_status()
+                            result = response.json()
+                            
+                            # Проверяем на ошибку attachment.not.ready
+                            if 'error' in result or 'errors' in result:
+                                error_msg = str(result.get('error', result.get('errors', '')))
+                                if 'attachment.not.ready' in error_msg.lower() or 'not.ready' in error_msg.lower():
+                                    if attempt < max_retries - 1:
+                                        logger.warning(f"mixed_group_attachment_not_ready_retry", attempt=attempt+1, delay=retry_delay)
+                                        await asyncio.sleep(retry_delay)
+                                        retry_delay *= 2
+                                        continue
+                            
+                            logger.info(
+                                "mixed_media_group_sent",
+                                max_channel_id=max_channel_id,
+                                photos_count=len(photos_data),
+                                videos_count=len(videos_data),
+                                total_attachments=len(attachments)
+                            )
+                            break
+                        except httpx.HTTPStatusError as e:
+                            if e.response:
+                                try:
+                                    error_data = e.response.json()
+                                    error_msg = str(error_data)
+                                    if 'attachment.not.ready' in error_msg.lower() or 'not.ready' in error_msg.lower():
+                                        if attempt < max_retries - 1:
+                                            logger.warning(f"mixed_group_attachment_not_ready_retry", attempt=attempt+1, delay=retry_delay)
+                                            await asyncio.sleep(retry_delay)
+                                            retry_delay *= 2
+                                            continue
+                                except:
+                                    pass
+                            if attempt == max_retries - 1:
+                                raise
+                        except Exception as e:
+                            if attempt == max_retries - 1:
+                                raise
+                            logger.warning(f"mixed_group_retry_after_error", attempt=attempt+1, error=str(e))
+                            await asyncio.sleep(retry_delay)
+                            retry_delay *= 2
+                    
+                    # Удаляем файлы после успешной отправки
+                    for photo_data in photos_data:
+                        if photo_data.get("local_file_path"):
+                            await delete_media_file(photo_data["local_file_path"])
+                    for video_data in videos_data:
+                        if video_data.get("local_file_path"):
+                            await delete_media_file(video_data["local_file_path"])
+                    
+                except Exception as e:
+                    logger.error(
+                        "failed_to_send_mixed_media_group",
+                        max_channel_id=link.max_channel.channel_id,
+                        error=str(e)
+                    )
+        
+        except Exception as e:
+            logger.error("mixed_media_group_send_error", error=str(e), exc_info=True)
     
     async def close(self):
         """Закрыть клиенты."""

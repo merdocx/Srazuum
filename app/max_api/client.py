@@ -149,11 +149,12 @@ class MaxAPIClient:
             upload_response.raise_for_status()
             upload_data = upload_response.json()
             upload_url = upload_data.get("url")
+            token_from_response = upload_data.get("token")  # Token может быть уже в ответе
             
             if not upload_url:
                 raise APIError("Не получен URL для загрузки файла", response=upload_data)
             
-            logger.info("upload_url_received", upload_url=upload_url[:100])
+            logger.info("upload_url_received", upload_url=upload_url[:100], has_token=bool(token_from_response))
             
             # Шаг 2: Загружаем файл
             from pathlib import Path
@@ -168,8 +169,17 @@ class MaxAPIClient:
             photo_ids = query_params.get("photoIds", [])
             
             with open(file_path, "rb") as f:
-                files = {"data": (file.name, f, "image/jpeg" if file_type == "image" else "application/octet-stream")}
-                upload_client = httpx.AsyncClient(timeout=60.0)
+                # Определяем Content-Type в зависимости от типа файла
+                content_type_map = {
+                    "image": "image/jpeg",
+                    "video": "video/mp4",
+                    "document": "application/octet-stream",
+                    "audio": "audio/mpeg"
+                }
+                content_type = content_type_map.get(file_type, "application/octet-stream")
+                
+                files = {"data": (file.name, f, content_type)}
+                upload_client = httpx.AsyncClient(timeout=120.0)  # Увеличиваем таймаут для видео
                 try:
                     upload_file_response = await upload_client.post(
                         upload_url,
@@ -177,24 +187,79 @@ class MaxAPIClient:
                         headers={"Authorization": self.token}
                     )
                     upload_file_response.raise_for_status()
-                    upload_result = upload_file_response.json()
                     
-                    # Извлекаем token из структуры {"photos": {"photoId": {"token": "..."}}}
-                    photos = upload_result.get("photos", {})
-                    if not photos:
-                        raise APIError("Не получен photos в ответе", response=upload_result)
-                    
-                    # Используем первый photoId из URL или первый ключ в photos
-                    photo_id = photo_ids[0] if photo_ids else list(photos.keys())[0]
-                    photo_data = photos.get(photo_id)
-                    
-                    if not photo_data:
-                        raise APIError(f"Не найден photoId {photo_id} в ответе", response=upload_result)
-                    
-                    token = photo_data.get("token")
-                    
-                    if not token:
-                        raise APIError("Не получен token после загрузки файла", response=upload_result)
+                    # Если token уже был в ответе от /uploads, используем его
+                    if token_from_response:
+                        token = token_from_response
+                        logger.info("using_token_from_upload_response", file_path=file_path)
+                    else:
+                        # Иначе пытаемся извлечь token из ответа CDN
+                        # Проверяем Content-Type ответа
+                        content_type_header = upload_file_response.headers.get("content-type", "")
+                        if "application/json" not in content_type_header.lower():
+                            # Если ответ не JSON, пробуем прочитать как текст
+                            response_text = upload_file_response.text
+                            logger.warning(
+                                "upload_response_not_json",
+                                content_type=content_type_header,
+                                response_preview=response_text[:200]
+                            )
+                            # Пробуем распарсить как JSON, даже если Content-Type не указан
+                            try:
+                                upload_result = upload_file_response.json()
+                            except Exception:
+                                # Если не JSON, возможно это HTML или другой формат
+                                # Проверяем, может быть ответ содержит JSON внутри
+                                import json
+                                import re
+                                # Пробуем найти JSON в ответе
+                                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                                if json_match:
+                                    upload_result = json.loads(json_match.group())
+                                else:
+                                    # Если ответ не JSON и token не был в первом ответе,
+                                    # это может быть просто подтверждение загрузки (например, <retval>1</retval>)
+                                    # В этом случае используем token из первого ответа, если он был
+                                    if token_from_response:
+                                        token = token_from_response
+                                        logger.info("using_token_from_upload_response_after_cdn_confirm", file_path=file_path)
+                                    else:
+                                        raise APIError(f"Ответ от CDN не является JSON и token не найден: {response_text[:200]}")
+                        else:
+                            upload_result = upload_file_response.json()
+                        
+                        # Извлекаем token из структуры ответа
+                        # Для фото: {"photos": {"photoId": {"token": "..."}}}
+                        # Для видео: может быть {"videos": {...}} или {"photos": {...}}
+                        token = None
+                        
+                        # Пробуем найти token в разных структурах
+                        if "photos" in upload_result:
+                            photos = upload_result.get("photos", {})
+                            if photos:
+                                # Используем первый photoId из URL или первый ключ в photos
+                                photo_id = photo_ids[0] if photo_ids else list(photos.keys())[0]
+                                photo_data = photos.get(photo_id)
+                                if photo_data:
+                                    token = photo_data.get("token")
+                        
+                        # Для видео может быть другая структура
+                        if not token and "videos" in upload_result:
+                            videos = upload_result.get("videos", {})
+                            if videos:
+                                # Аналогично для видео
+                                video_id = list(videos.keys())[0]
+                                video_data = videos.get(video_id)
+                                if video_data:
+                                    token = video_data.get("token")
+                        
+                        # Если token не найден, пробуем найти его напрямую в ответе
+                        if not token:
+                            token = upload_result.get("token")
+                        
+                        if not token:
+                            logger.error("upload_result_structure", upload_result=upload_result)
+                            raise APIError("Не получен token после загрузки файла", response=upload_result)
                     
                     logger.info("file_uploaded", file_path=file_path, token=token[:20])
                     return token
@@ -390,6 +455,173 @@ class MaxAPIClient:
             logger.error("failed_to_send_photo", chat_id=chat_id, error=str(e))
             raise APIError(f"Неожиданная ошибка при отправке фото: {e}")
     
+    async def send_video(
+        self,
+        chat_id: str,
+        video_url: str,
+        caption: Optional[str] = None,
+        local_file_path: Optional[str] = None,
+        parse_mode: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Отправить видео в канал.
+        
+        Args:
+            chat_id: ID канала в MAX
+            video_url: URL видео (для fallback)
+            caption: Подпись к видео
+            local_file_path: Путь к локальному файлу видео
+            parse_mode: Режим парсинга (HTML, Markdown)
+        
+        Returns:
+            Информация об отправленном сообщении
+        """
+        # Преобразуем chat_id в правильный формат для query parameter
+        try:
+            if isinstance(chat_id, str) and (chat_id.lstrip('-').isdigit() or chat_id.lstrip('-').replace('.', '').isdigit()):
+                chat_id_value = int(float(chat_id))
+            elif isinstance(chat_id, (int, float)):
+                chat_id_value = int(chat_id)
+            else:
+                chat_id_value = chat_id
+        except (ValueError, TypeError):
+            chat_id_value = chat_id
+        
+        # ВАЖНО: MAX API требует загрузку файла через /uploads endpoint
+        # Сначала загружаем файл, получаем token, затем используем его в attachments
+        # Видео может обрабатываться дольше, поэтому увеличиваем задержку
+        if local_file_path:
+            try:
+                token = await self.upload_file(local_file_path, "video")
+                
+                # Для видео требуется больше времени на обработку
+                await asyncio.sleep(3)
+                
+                # Формируем запрос с attachments и payload.token
+                text = caption or ""  # Пустая строка, если нет caption
+                data = {
+                    "text": text,
+                    "attachments": [{
+                        "type": "video",
+                        "payload": {
+                            "token": token
+                        }
+                    }]
+                }
+                if parse_mode:
+                    # MAX API использует "format" вместо "parse_mode"
+                    data["format"] = parse_mode
+                
+                await max_api_limiter.wait_if_needed(f"max_api_{chat_id}")
+                
+                # Пробуем отправить с повторными попытками при ошибке attachment.not.ready
+                max_retries = 5  # Для видео больше попыток
+                retry_delay = 3  # Больше задержка для видео
+                
+                for attempt in range(max_retries):
+                    try:
+                        response = await retry_with_backoff(
+                            self.client.post,
+                            f"/messages?chat_id={chat_id_value}",
+                            json=data
+                        )
+                        response.raise_for_status()
+                        result = response.json()
+                        
+                        # Проверяем на ошибку attachment.not.ready
+                        if 'error' in result or 'errors' in result:
+                            error_msg = str(result.get('error', result.get('errors', '')))
+                            if 'attachment.not.ready' in error_msg.lower() or 'not.ready' in error_msg.lower():
+                                if attempt < max_retries - 1:
+                                    logger.warning(f"video_attachment_not_ready_retry", attempt=attempt+1, delay=retry_delay)
+                                    await asyncio.sleep(retry_delay)
+                                    retry_delay *= 2  # Увеличиваем задержку
+                                    continue
+                        
+                        logger.info("video_sent", chat_id=chat_id, message_id=result.get("message_id"), result=result)
+                        return result
+                    except httpx.HTTPStatusError as e:
+                        if e.response:
+                            try:
+                                error_data = e.response.json()
+                                error_msg = str(error_data)
+                                if 'attachment.not.ready' in error_msg.lower() or 'not.ready' in error_msg.lower():
+                                    if attempt < max_retries - 1:
+                                        logger.warning(f"video_attachment_not_ready_retry", attempt=attempt+1, delay=retry_delay)
+                                        await asyncio.sleep(retry_delay)
+                                        retry_delay *= 2
+                                        continue
+                            except:
+                                pass
+                        if attempt == max_retries - 1:
+                            raise
+                    except Exception as e:
+                        if attempt == max_retries - 1:
+                            raise
+                        logger.warning(f"video_retry_after_error", attempt=attempt+1, error=str(e))
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2
+                
+            except Exception as e:
+                logger.error("failed_to_send_video_via_upload", chat_id=chat_id, error=str(e))
+                raise
+        
+        # Fallback: отправка текста с упоминанием видео
+        text = caption or "[Видео]"
+        if caption:
+            text = f"[Видео]\n{caption}"
+        else:
+            text = "[Видео]"
+        
+        data = {
+            "text": text
+        }
+        if parse_mode:
+            # MAX API использует "format" вместо "parse_mode"
+            data["format"] = parse_mode
+        
+        try:
+            await max_api_limiter.wait_if_needed(f"max_api_{chat_id}")
+            response = await retry_with_backoff(
+                self.client.post,
+                f"/messages?chat_id={chat_id_value}",
+                json=data
+            )
+            response.raise_for_status()
+            result = response.json()
+            logger.info("video_fallback_sent", chat_id=chat_id, message_id=result.get("message_id"))
+            return result
+        except httpx.HTTPStatusError as e:
+            error_response = None
+            try:
+                if e.response:
+                    error_response = e.response.json()
+                    logger.error(
+                        "failed_to_send_video",
+                        chat_id=chat_id,
+                        status_code=e.response.status_code,
+                        error_response=error_response
+                    )
+            except:
+                error_response = e.response.text if e.response else None
+                logger.error(
+                    "failed_to_send_video",
+                    chat_id=chat_id,
+                    status_code=e.response.status_code if e.response else None,
+                    error_response=error_response
+                )
+            raise APIError(
+                f"HTTP ошибка при отправке видео: {e.response.status_code}",
+                status_code=e.response.status_code,
+                response=error_response
+            )
+        except httpx.RequestError as e:
+            logger.error("failed_to_send_video", chat_id=chat_id, error=str(e))
+            raise APIError(f"Ошибка сети при отправке видео: {e}")
+        except Exception as e:
+            logger.error("failed_to_send_video", chat_id=chat_id, error=str(e))
+            raise APIError(f"Неожиданная ошибка при отправке видео: {e}")
+    
     async def send_photos(
         self,
         chat_id: str,
@@ -511,6 +743,156 @@ class MaxAPIClient:
         except Exception as e:
             logger.error("failed_to_send_photos", chat_id=chat_id, error=str(e))
             raise APIError(f"Неожиданная ошибка при отправке фото: {e}")
+    
+    async def send_videos(
+        self,
+        chat_id: str,
+        local_file_paths: List[str],
+        caption: Optional[str] = None,
+        parse_mode: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Отправить несколько видео в одном сообщении (альбом).
+        
+        Args:
+            chat_id: ID канала в MAX
+            local_file_paths: Список путей к локальным файлам видео
+            caption: Подпись к альбому
+            parse_mode: Режим парсинга (HTML, Markdown)
+        
+        Returns:
+            Информация об отправленном сообщении
+        """
+        if not local_file_paths:
+            raise APIError("Список файлов пуст")
+        
+        # Преобразуем chat_id в правильный формат для query parameter
+        try:
+            if isinstance(chat_id, str) and (chat_id.lstrip('-').isdigit() or chat_id.lstrip('-').replace('.', '').isdigit()):
+                chat_id_value = int(float(chat_id))
+            elif isinstance(chat_id, (int, float)):
+                chat_id_value = int(chat_id)
+            else:
+                chat_id_value = chat_id
+        except (ValueError, TypeError):
+            chat_id_value = chat_id
+        
+        try:
+            # Загружаем все видео и получаем токены
+            tokens = []
+            for file_path in local_file_paths:
+                token = await self.upload_file(file_path, "video")
+                tokens.append(token)
+                # Небольшая задержка между загрузками (для видео больше)
+                await asyncio.sleep(1)
+            
+            # Ждем обработки всех файлов (для видео дольше)
+            await asyncio.sleep(3)
+            
+            # Формируем запрос с массивом attachments
+            text = caption or ""  # Пустая строка, если нет caption
+            data = {
+                "text": text,
+                "attachments": [
+                    {
+                        "type": "video",
+                        "payload": {
+                            "token": token
+                        }
+                    }
+                    for token in tokens
+                ]
+            }
+            if parse_mode:
+                # MAX API использует "format" вместо "parse_mode"
+                data["format"] = parse_mode
+            
+            await max_api_limiter.wait_if_needed(f"max_api_{chat_id}")
+            
+            # Пробуем отправить с повторными попытками при ошибке attachment.not.ready
+            max_retries = 5  # Для видео больше попыток
+            retry_delay = 3  # Больше задержка для видео
+            
+            for attempt in range(max_retries):
+                try:
+                    response = await retry_with_backoff(
+                        self.client.post,
+                        f"/messages?chat_id={chat_id_value}",
+                        json=data
+                    )
+                    response.raise_for_status()
+                    result = response.json()
+                    
+                    # Проверяем на ошибку attachment.not.ready
+                    if 'error' in result or 'errors' in result:
+                        error_msg = str(result.get('error', result.get('errors', '')))
+                        if 'attachment.not.ready' in error_msg.lower() or 'not.ready' in error_msg.lower():
+                            if attempt < max_retries - 1:
+                                logger.warning(f"videos_attachment_not_ready_retry", attempt=attempt+1, delay=retry_delay)
+                                await asyncio.sleep(retry_delay)
+                                retry_delay *= 2  # Увеличиваем задержку
+                                continue
+                    
+                    logger.info(
+                        "videos_sent",
+                        chat_id=chat_id,
+                        videos_count=len(tokens),
+                        message_id=result.get("message_id"),
+                        result=result
+                    )
+                    return result
+                except httpx.HTTPStatusError as e:
+                    if e.response:
+                        try:
+                            error_data = e.response.json()
+                            error_msg = str(error_data)
+                            if 'attachment.not.ready' in error_msg.lower() or 'not.ready' in error_msg.lower():
+                                if attempt < max_retries - 1:
+                                    logger.warning(f"videos_attachment_not_ready_retry", attempt=attempt+1, delay=retry_delay)
+                                    await asyncio.sleep(retry_delay)
+                                    retry_delay *= 2
+                                    continue
+                        except:
+                            pass
+                    if attempt == max_retries - 1:
+                        raise
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    logger.warning(f"videos_retry_after_error", attempt=attempt+1, error=str(e))
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+            
+        except httpx.HTTPStatusError as e:
+            error_response = None
+            try:
+                if e.response:
+                    error_response = e.response.json()
+                    logger.error(
+                        "failed_to_send_videos",
+                        chat_id=chat_id,
+                        status_code=e.response.status_code,
+                        error_response=error_response
+                    )
+            except:
+                error_response = e.response.text if e.response else None
+                logger.error(
+                    "failed_to_send_videos",
+                    chat_id=chat_id,
+                    status_code=e.response.status_code if e.response else None,
+                    error_response=error_response
+                )
+            raise APIError(
+                f"HTTP ошибка при отправке видео: {e.response.status_code}",
+                status_code=e.response.status_code,
+                response=error_response
+            )
+        except httpx.RequestError as e:
+            logger.error("failed_to_send_videos", chat_id=chat_id, error=str(e))
+            raise APIError(f"Ошибка сети при отправке видео: {e}")
+        except Exception as e:
+            logger.error("failed_to_send_videos", chat_id=chat_id, error=str(e))
+            raise APIError(f"Неожиданная ошибка при отправке видео: {e}")
     
     async def get_chat(self, chat_id: str) -> Dict[str, Any]:
         """
