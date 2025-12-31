@@ -19,6 +19,7 @@ from app.utils.rate_limiter import max_api_limiter
 from app.utils.circuit_breaker import CircuitBreaker
 from app.utils.metrics import metrics_collector, record_operation_time
 from app.utils.chat_id_converter import convert_chat_id
+from app.core.migration_queue import migration_queue
 from config.database import async_session_maker
 from config.settings import settings
 
@@ -44,7 +45,8 @@ class MessageProcessor:
         self,
         telegram_channel_id: int,
         telegram_message_id: int,
-        message_data: Dict[str, Any]
+        message_data: Dict[str, Any],
+        link_id: Optional[int] = None
     ) -> bool:
         """
         Обработать сообщение из Telegram и отправить в MAX.
@@ -289,6 +291,45 @@ class MessageProcessor:
             error=error_message
         )
     
+    async def _batch_update_message_logs(
+        self,
+        updates: List[Dict[str, Any]],
+        start_time: datetime
+    ) -> None:
+        """
+        Batch update для message logs.
+        
+        Args:
+            updates: Список словарей с данными для обновления
+            start_time: Время начала обработки
+        """
+        if not updates:
+            return
+        
+        async with async_session_maker() as session:
+            async with session.begin():
+                for update_data in updates:
+                    message_log_id = update_data.get("message_log_id")
+                    max_message_id = update_data.get("max_message_id")
+                    processing_time = update_data.get("processing_time", 0)
+                    
+                    if message_log_id:
+                        await session.execute(
+                            update(MessageLog)
+                            .where(MessageLog.id == message_log_id)
+                            .values(
+                                max_message_id=max_message_id,
+                                status=MessageStatus.SUCCESS.value,
+                                processing_time_ms=processing_time,
+                                sent_at=datetime.utcnow()
+                            )
+                        )
+        
+        logger.debug(
+            "batch_message_logs_updated",
+            count=len(updates)
+        )
+    
     @record_operation_time("send_to_max")
     async def _send_to_max(
         self,
@@ -423,6 +464,46 @@ class MessageProcessor:
         if not message.text and not message.caption and not (message.photo or message.video or message.document or message.audio or message.voice or message.sticker):
             logger.debug("skipping_empty_message", chat_id=message.chat.id if message.chat else None)
             return
+        
+        # Получаем ID канала Telegram
+        telegram_chat_id = message.chat.id if message.chat else None
+        if not telegram_chat_id:
+            return
+        
+        # Проверяем, идет ли миграция для этого канала
+        from app.models.telegram_channel import TelegramChannel
+        async with async_session_maker() as session:
+            result = await session.execute(
+                select(TelegramChannel).where(TelegramChannel.channel_id == telegram_chat_id)
+            )
+            telegram_channel = result.scalar_one_or_none()
+            
+            if telegram_channel:
+                # Получаем все активные связи для канала
+                links_result = await session.execute(
+                    select(CrosspostingLink)
+                    .where(CrosspostingLink.telegram_channel_id == telegram_channel.id)
+                    .where(CrosspostingLink.is_enabled == True)
+                )
+                links = links_result.scalars().all()
+                
+                # Проверяем, идет ли миграция для какой-либо связи
+                for link in links:
+                    if await migration_queue.is_migrating(link.id):
+                        # Добавляем сообщение в очередь
+                        message_data = {
+                            "message_id": message.id,
+                            "text": message.text or "",
+                            "caption": message.caption or "",
+                            "photo": message.photo,
+                            "video": message.video,
+                            "document": message.document,
+                            "media_group_id": getattr(message, 'media_group_id', None),
+                            "date": message.date
+                        }
+                        await migration_queue.add_message(link.id, message_data)
+                        logger.debug("message_added_to_migration_queue", link_id=link.id, message_id=message.id)
+                        return
         
         # Если сообщение входит в медиа-группу, обрабатываем через handler
         if hasattr(message, 'media_group_id') and message.media_group_id is not None:
@@ -594,13 +675,14 @@ class MessageProcessor:
             message_data=message_data
         )
     
-    async def _process_media_group(self, messages: List, client=None) -> None:
+    async def _process_media_group(self, messages: List, client=None, link_id: Optional[int] = None) -> None:
         """
         Обработать группу медиа-сообщений (альбом).
         
         Args:
             messages: Список сообщений из одной медиа-группы
             client: Pyrogram клиент для загрузки медиа
+            link_id: ID связи для миграции (опционально)
         """
         from app.utils.media_handler import download_and_store_media, delete_media_file
         
@@ -633,6 +715,7 @@ class MessageProcessor:
             telegram_channel_id = telegram_channel.id
         
         # Собираем все медиа из группы (фото и видео)
+        # ВАЖНО: Нет ограничений на количество медиафайлов - обрабатываются ВСЕ файлы из группы
         photos_data = []
         videos_data = []
         caption = None
@@ -699,7 +782,7 @@ class MessageProcessor:
         elif photos_data and videos_data:
             # Смешанная группа - отправляем все медиа одним сообщением
             logger.info("mixed_media_group", photos_count=len(photos_data), videos_count=len(videos_data))
-            await self._send_mixed_media_group(telegram_channel_id, photos_data, videos_data, caption, caption_parse_mode, client)
+            await self._send_mixed_media_group(telegram_channel_id, photos_data, videos_data, caption, caption_parse_mode, client, link_id=link_id)
             return
         else:
             logger.warning("no_media_in_media_group")
@@ -713,7 +796,7 @@ class MessageProcessor:
         )
         
         # Отправляем группу медиа
-        await self._send_media_group(telegram_channel_id, media_data, media_type, caption, caption_parse_mode, client)
+        await self._send_media_group(telegram_channel_id, media_data, media_type, caption, caption_parse_mode, client, link_id=link_id)
     
     async def _send_media_group(
         self,
@@ -823,10 +906,12 @@ class MessageProcessor:
         """
         Отправить смешанную группу медиа (фото + видео) одним сообщением в MAX.
         
+        ВАЖНО: Нет ограничений на количество медиафайлов - отправляются ВСЕ фото и видео из группы.
+        
         Args:
             telegram_channel_id: ID Telegram канала в БД
-            photos_data: Список словарей с данными фото
-            videos_data: Список словарей с данными видео
+            photos_data: Список словарей с данными фото (без ограничений по количеству)
+            videos_data: Список словарей с данными видео (без ограничений по количеству)
             caption: Подпись к группе
             caption_parse_mode: Режим форматирования подписи
             client: Pyrogram клиент

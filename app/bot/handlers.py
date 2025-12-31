@@ -1,6 +1,6 @@
 """Обработчики команд Telegram бота."""
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
@@ -26,7 +26,8 @@ from app.bot.keyboards import (
     get_link_detail_keyboard,
     get_delete_confirm_keyboard,
     get_back_to_menu_keyboard,
-    get_retry_keyboard
+    get_retry_keyboard,
+    get_migrate_links_keyboard
 )
 from config.database import async_session_maker
 from config.settings import settings
@@ -64,6 +65,19 @@ class AddChannelStates(StatesGroup):
     """Состояния для добавления канала."""
     waiting_telegram_channel = State()
     waiting_max_channel = State()
+
+
+class LinkManagementStates(StatesGroup):
+    """Состояния для управления связями."""
+    viewing_link_detail = State()  # Хранит link_id
+    viewing_channels_list = State()  # Хранит page
+    confirming_delete = State()  # Хранит link_id
+
+
+class MigrateStates(StatesGroup):
+    """Состояния для миграции постов."""
+    selecting_link = State()  # Выбор связи для миграции
+    migrating = State()  # Процесс миграции активен
 
 
 async def get_or_create_user(telegram_user_id: int, username: Optional[str] = None) -> User:
@@ -134,27 +148,25 @@ async def cmd_help(message: Message):
     await message.answer(text, reply_markup=get_back_to_menu_keyboard())
 
 
-@router.callback_query(F.data == "help")
-async def callback_help(callback: CallbackQuery):
+@router.message(F.text == "❓ Помощь")
+async def message_help(message: Message):
     """Обработчик кнопки помощи."""
     text = (
         "📖 Помощь по использованию бота:\n\n"
         "Используйте кнопки для управления кросспостингом:\n\n"
         "➕ Добавить связь - Создать новую связь каналов\n"
         "📋 Список связей - Просмотр всех ваших связей\n"
-        "📊 Статус - Общая статистика кросспостинга\n"
-        "⚙️ Настройки - Настройки бота\n\n"
+        "📊 Статус - Общая статистика кросспостинга\n\n"
         "Для управления конкретной связью:\n"
         "1. Откройте список связей\n"
         "2. Выберите нужную связь\n"
         "3. Используйте кнопки для управления"
     )
-    await callback.message.edit_text(text, reply_markup=get_back_to_menu_keyboard())
-    await callback.answer()
+    await message.answer(text, reply_markup=get_back_to_menu_keyboard())
 
 
-@router.callback_query(F.data == "main_menu")
-async def callback_main_menu(callback: CallbackQuery, state: FSMContext):
+@router.message(F.text == "🏠 Главное меню")
+async def message_main_menu(message: Message, state: FSMContext):
     """Обработчик кнопки главного меню."""
     await state.clear()
     text = (
@@ -162,15 +174,15 @@ async def callback_main_menu(callback: CallbackQuery, state: FSMContext):
         "Используйте кнопку «➕ Добавить связь» для создания связи между каналами в Telegram и MAX.\n\n"
         "Выберите действие:"
     )
-    await callback.message.edit_text(text, reply_markup=get_main_keyboard())
-    await callback.answer()
-    logger.info("main_menu_opened", user_id=callback.from_user.id)
+    await message.answer(text, reply_markup=get_main_keyboard())
+    logger.info("main_menu_opened", user_id=message.from_user.id)
 
 
-@router.callback_query(F.data.startswith("retry_"))
-async def callback_retry(callback: CallbackQuery, state: FSMContext):
+@router.message(F.text == "🔄 Повторить")
+async def message_retry(message: Message, state: FSMContext):
     """Обработчик кнопки повтора."""
-    retry_state = callback.data.replace("retry_", "")
+    data = await state.get_data()
+    retry_state = data.get("retry_state", "add_channel")
     
     if retry_state == "telegram_channel":
         await state.set_state(AddChannelStates.waiting_telegram_channel)
@@ -190,12 +202,12 @@ async def callback_retry(callback: CallbackQuery, state: FSMContext):
             "• Отправьте username канала, или\n"
             "• Отправьте cсылку на канал"
         )
-        await callback.message.edit_text(text, reply_markup=get_back_to_menu_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        await message.answer(text, reply_markup=get_back_to_menu_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
     elif retry_state == "max_channel":
         await state.set_state(AddChannelStates.waiting_max_channel)
         text = "Отправьте ID или username вашего MAX-канала."
-        await callback.message.edit_text(text, reply_markup=get_back_to_menu_keyboard())
-    elif retry_state == "add_channel":
+        await message.answer(text, reply_markup=get_back_to_menu_keyboard())
+    else:
         await state.set_state(AddChannelStates.waiting_telegram_channel)
         text = (
             "📋 Создание связи каналов\n\n"
@@ -213,13 +225,9 @@ async def callback_retry(callback: CallbackQuery, state: FSMContext):
             "• Отправьте username канала, или\n"
             "• Отправьте cсылку на канал"
         )
-        await callback.message.edit_text(text, reply_markup=get_back_to_menu_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
-    else:
-        await callback.answer("Неизвестное действие", show_alert=True)
-        return
+        await message.answer(text, reply_markup=get_back_to_menu_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
     
-    await callback.answer()
-    logger.info("retry_action", state=retry_state, user_id=callback.from_user.id)
+    logger.info("retry_action", state=retry_state, user_id=message.from_user.id)
 
 
 @router.message(Command("add_channel"))
@@ -246,8 +254,8 @@ async def cmd_add_channel(message: Message, state: FSMContext):
     logger.info("add_channel_started", user_id=message.from_user.id)
 
 
-@router.callback_query(F.data == "add_channel")
-async def callback_add_channel(callback: CallbackQuery, state: FSMContext):
+@router.message(F.text == "➕ Добавить связь")
+async def message_add_channel(message: Message, state: FSMContext):
     """Обработчик кнопки добавления связи."""
     text = (
         "📋 Создание связи каналов\n\n"
@@ -265,10 +273,9 @@ async def callback_add_channel(callback: CallbackQuery, state: FSMContext):
         "• Отправьте username канала, или\n"
         "• Отправьте cсылку на канал"
     )
-    await callback.message.edit_text(text, reply_markup=get_back_to_menu_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+    await message.answer(text, reply_markup=get_back_to_menu_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
     await state.set_state(AddChannelStates.waiting_telegram_channel)
-    await callback.answer()
-    logger.info("add_channel_started", user_id=callback.from_user.id)
+    logger.info("add_channel_started", user_id=message.from_user.id)
 
 
 @router.message(AddChannelStates.waiting_telegram_channel)
@@ -336,6 +343,7 @@ async def process_telegram_channel(message: Message, state: FSMContext):
             )
             return
     else:
+        await state.update_data(retry_state="telegram_channel")
         await message.answer(
             "❌ Пожалуйста, используйте один из способов:\n\n"
             "• Перешлите сообщение из канала\n"
@@ -788,21 +796,17 @@ async def cmd_list_channels(message: Message):
     await show_channels_list(message)
 
 
-@router.callback_query(F.data == "list_channels")
-async def callback_list_channels(callback: CallbackQuery):
+@router.message(F.text == "📋 Список связей")
+async def message_list_channels(message: Message, state: FSMContext):
     """Обработчик кнопки списка связей."""
-    await show_channels_list(callback.message, callback=callback)
+    await state.update_data(channels_list_page=0)
+    await show_channels_list(message)
 
 
-async def show_channels_list(message: Message, callback: Optional[CallbackQuery] = None):
+async def show_channels_list(message: Message, state: FSMContext = None, page: int = 0):
     """Показать список связей с клавиатурой."""
-    # Получаем user_id из callback, если он есть, иначе из message
-    if callback:
-        telegram_user_id = callback.from_user.id
-        username = callback.from_user.username
-    else:
-        telegram_user_id = message.from_user.id
-        username = message.from_user.username
+    telegram_user_id = message.from_user.id
+    username = message.from_user.username
     
     user = await get_or_create_user(telegram_user_id, username)
     
@@ -820,11 +824,7 @@ async def show_channels_list(message: Message, callback: Optional[CallbackQuery]
         
         if not links:
             text = "У вас пока нет созданных связей. Используйте кнопку «➕ Добавить связь» для создания."
-            if callback:
-                await callback.message.edit_text(text, reply_markup=get_back_to_menu_keyboard())
-                await callback.answer()
-            else:
-                await message.answer(text, reply_markup=get_back_to_menu_keyboard())
+            await message.answer(text, reply_markup=get_back_to_menu_keyboard())
             return
         
         # Подготовка данных для клавиатуры
@@ -838,52 +838,33 @@ async def show_channels_list(message: Message, callback: Optional[CallbackQuery]
             })
         
         text = "📋 Ваши связи каналов:\n\nВыберите связь для управления:"
-        keyboard = get_channels_list_keyboard(links_data, page=0)
-        
-        if callback:
-            await callback.message.edit_text(text, reply_markup=keyboard)
-            await callback.answer()
-        else:
-            await message.answer(text, reply_markup=keyboard)
-
-
-@router.callback_query(F.data.startswith("list_channels_page_"))
-async def callback_list_channels_page(callback: CallbackQuery):
-    """Обработчик пагинации списка связей."""
-    try:
-        page = int(callback.data.split("_")[-1])
-    except ValueError:
-        await callback.answer("Ошибка пагинации")
-        return
-    
-    user = await get_or_create_user(callback.from_user.id, callback.from_user.username)
-    
-    async with async_session_maker() as session:
-        result = await session.execute(
-            select(CrosspostingLink)
-            .options(
-                selectinload(CrosspostingLink.telegram_channel),
-                selectinload(CrosspostingLink.max_channel)
-            )
-            .where(CrosspostingLink.user_id == user.id)
-            .order_by(CrosspostingLink.created_at.desc())
-        )
-        links = result.scalars().all()
-        
-        links_data = []
-        for link in links:
-            links_data.append({
-                "id": link.id,
-                "telegram_title": link.telegram_channel.channel_title,
-                "max_title": link.max_channel.channel_title,
-                "is_enabled": link.is_enabled
-            })
-        
-        text = "📋 Ваши связи каналов:\n\nВыберите связь для управления:"
         keyboard = get_channels_list_keyboard(links_data, page=page)
         
-        await callback.message.edit_text(text, reply_markup=keyboard)
-        await callback.answer()
+        if state:
+            await state.update_data(channels_list_page=page, links_data=links_data)
+        
+        await message.answer(text, reply_markup=keyboard)
+
+
+@router.message(F.text.in_(["◀️ Назад", "Вперед ▶️"]))
+async def message_list_channels_nav(message: Message, state: FSMContext):
+    """Обработчик навигации по списку связей."""
+    data = await state.get_data()
+    current_page = data.get("channels_list_page", 0)
+    links_data = data.get("links_data", [])
+    
+    if not links_data:
+        await message.answer("Список связей не найден. Используйте кнопку «📋 Список связей».", reply_markup=get_main_keyboard())
+        return
+    
+    per_page = 5
+    if message.text == "◀️ Назад":
+        new_page = max(0, current_page - 1)
+    else:  # "Вперед ▶️"
+        new_page = min((len(links_data) - 1) // per_page, current_page + 1)
+    
+    await state.update_data(channels_list_page=new_page)
+    await show_channels_list(message, state, page=new_page)
 
 
 @router.message(Command("status"))
@@ -903,21 +884,16 @@ async def cmd_status(message: Message):
     await show_status(message)
 
 
-@router.callback_query(F.data == "status")
-async def callback_status(callback: CallbackQuery):
+@router.message(F.text == "📊 Статус")
+async def message_status(message: Message):
     """Обработчик кнопки статуса."""
-    await show_status(callback.message, callback=callback)
+    await show_status(message)
 
 
-async def show_status(message: Message, callback: Optional[CallbackQuery] = None):
+async def show_status(message: Message):
     """Показать общий статус кросспостинга."""
-    # Получаем user_id из callback, если он есть, иначе из message
-    if callback:
-        telegram_user_id = callback.from_user.id
-        username = callback.from_user.username
-    else:
-        telegram_user_id = message.from_user.id
-        username = message.from_user.username
+    telegram_user_id = message.from_user.id
+    username = message.from_user.username
     
     user = await get_or_create_user(telegram_user_id, username)
     
@@ -955,11 +931,7 @@ async def show_status(message: Message, callback: Optional[CallbackQuery] = None
             f"Используйте список связей для детальной информации."
         )
         
-        if callback:
-            await callback.message.edit_text(text, reply_markup=get_back_to_menu_keyboard())
-            await callback.answer()
-        else:
-            await message.answer(text, reply_markup=get_back_to_menu_keyboard())
+        await message.answer(text, reply_markup=get_back_to_menu_keyboard())
 
 
 async def cmd_status_detail(message: Message, user: User, link_id: int):
@@ -1139,60 +1111,21 @@ async def cmd_delete(message: Message):
         logger.info("link_deleted", link_id=link_id, user_id=user.id)
 
 # ============================================================================
-# Обработчики callback_query для кнопок управления связями
+# Обработчики message для кнопок управления связями
 # ============================================================================
 
-@router.callback_query(F.data.startswith("link_detail_"))
-async def callback_link_detail(callback: CallbackQuery):
-    """Обработчик кнопки детальной информации о связи."""
-    try:
-        link_id = int(callback.data.split("_")[-1])
-    except ValueError:
-        await callback.answer("Ошибка: неверный ID связи")
-        return
-    
-    user = await get_or_create_user(callback.from_user.id, callback.from_user.username)
-    
-    async with async_session_maker() as session:
-        result = await session.execute(
-            select(CrosspostingLink)
-            .options(
-                selectinload(CrosspostingLink.telegram_channel),
-                selectinload(CrosspostingLink.max_channel)
-            )
-            .where(CrosspostingLink.id == link_id)
-            .where(CrosspostingLink.user_id == user.id)
-        )
-        link = result.scalar_one_or_none()
-        
-        if not link:
-            await callback.answer("Связь не найдена", show_alert=True)
-            return
-        
-        status_icon = "✅" if link.is_enabled else "❌"
-        text = (
-            f"{status_icon} Связь #{link.id}\n\n"
-            f"Telegram: {link.telegram_channel.channel_title}\n"
-            f"MAX: {link.max_channel.channel_title}\n"
-            f"Статус: {'Активна' if link.is_enabled else 'Неактивна'}\n"
-            f"Создана: {link.created_at.strftime('%Y-%m-%d %H:%M')}"
-        )
-        
-        keyboard = get_link_detail_keyboard(link_id, link.is_enabled)
-        await callback.message.edit_text(text, reply_markup=keyboard)
-        await callback.answer()
 
-
-@router.callback_query(F.data.startswith("enable_"))
-async def callback_enable(callback: CallbackQuery):
+@router.message(LinkManagementStates.viewing_link_detail, F.text == "▶️ Включить")
+async def message_enable(message: Message, state: FSMContext):
     """Обработчик кнопки включения связи."""
-    try:
-        link_id = int(callback.data.split("_")[-1])
-    except ValueError:
-        await callback.answer("Ошибка: неверный ID связи", show_alert=True)
+    data = await state.get_data()
+    link_id = data.get("current_link_id")
+    
+    if not link_id:
+        await message.answer("Ошибка: не найдена текущая связь.")
         return
     
-    user = await get_or_create_user(callback.from_user.id, callback.from_user.username)
+    user = await get_or_create_user(message.from_user.id, message.from_user.username)
     
     async with async_session_maker() as session:
         result = await session.execute(
@@ -1207,11 +1140,11 @@ async def callback_enable(callback: CallbackQuery):
         link = result.scalar_one_or_none()
         
         if not link:
-            await callback.answer("Связь не найдена", show_alert=True)
+            await message.answer("Связь не найдена.")
             return
         
         if link.is_enabled:
-            await callback.answer("Связь уже включена")
+            await message.answer("Связь уже включена.")
             return
         
         link.is_enabled = True
@@ -1230,21 +1163,21 @@ async def callback_enable(callback: CallbackQuery):
         )
         
         keyboard = get_link_detail_keyboard(link_id, True)
-        await callback.message.edit_text(text, reply_markup=keyboard)
-        await callback.answer("✅ Кросспостинг включен")
+        await message.answer("✅ Кросспостинг включен\n\n" + text, reply_markup=keyboard)
         logger.info("link_enabled", link_id=link_id, user_id=user.id)
 
 
-@router.callback_query(F.data.startswith("disable_"))
-async def callback_disable(callback: CallbackQuery):
+@router.message(LinkManagementStates.viewing_link_detail, F.text == "⏸ Отключить")
+async def message_disable(message: Message, state: FSMContext):
     """Обработчик кнопки отключения связи."""
-    try:
-        link_id = int(callback.data.split("_")[-1])
-    except ValueError:
-        await callback.answer("Ошибка: неверный ID связи", show_alert=True)
+    data = await state.get_data()
+    link_id = data.get("current_link_id")
+    
+    if not link_id:
+        await message.answer("Ошибка: не найдена текущая связь.")
         return
     
-    user = await get_or_create_user(callback.from_user.id, callback.from_user.username)
+    user = await get_or_create_user(message.from_user.id, message.from_user.username)
     
     async with async_session_maker() as session:
         result = await session.execute(
@@ -1259,11 +1192,11 @@ async def callback_disable(callback: CallbackQuery):
         link = result.scalar_one_or_none()
         
         if not link:
-            await callback.answer("Связь не найдена", show_alert=True)
+            await message.answer("Связь не найдена.")
             return
         
         if not link.is_enabled:
-            await callback.answer("Связь уже отключена")
+            await message.answer("Связь уже отключена.")
             return
         
         link.is_enabled = False
@@ -1282,21 +1215,21 @@ async def callback_disable(callback: CallbackQuery):
         )
         
         keyboard = get_link_detail_keyboard(link_id, False)
-        await callback.message.edit_text(text, reply_markup=keyboard)
-        await callback.answer("❌ Кросспостинг отключен")
+        await message.answer("❌ Кросспостинг отключен\n\n" + text, reply_markup=keyboard)
         logger.info("link_disabled", link_id=link_id, user_id=user.id)
 
 
-@router.callback_query(F.data.startswith("delete_confirm_"))
-async def callback_delete_confirm(callback: CallbackQuery):
+@router.message(LinkManagementStates.viewing_link_detail, F.text == "🗑 Удалить")
+async def message_delete_confirm(message: Message, state: FSMContext):
     """Обработчик кнопки подтверждения удаления."""
-    try:
-        link_id = int(callback.data.split("_")[-1])
-    except ValueError:
-        await callback.answer("Ошибка: неверный ID связи", show_alert=True)
+    data = await state.get_data()
+    link_id = data.get("current_link_id")
+    
+    if not link_id:
+        await message.answer("Ошибка: не найдена текущая связь.")
         return
     
-    user = await get_or_create_user(callback.from_user.id, callback.from_user.username)
+    user = await get_or_create_user(message.from_user.id, message.from_user.username)
     
     async with async_session_maker() as session:
         result = await session.execute(
@@ -1311,8 +1244,11 @@ async def callback_delete_confirm(callback: CallbackQuery):
         link = result.scalar_one_or_none()
         
         if not link:
-            await callback.answer("Связь не найдена", show_alert=True)
+            await message.answer("Связь не найдена.")
             return
+        
+        await state.update_data(delete_link_id=link_id)
+        await state.set_state(LinkManagementStates.confirming_delete)
         
         text = (
             f"⚠️ Подтвердите удаление связи #{link_id}\n\n"
@@ -1322,20 +1258,21 @@ async def callback_delete_confirm(callback: CallbackQuery):
         )
         
         keyboard = get_delete_confirm_keyboard(link_id)
-        await callback.message.edit_text(text, reply_markup=keyboard)
-        await callback.answer()
+        await message.answer(text, reply_markup=keyboard)
 
 
-@router.callback_query(F.data.startswith("delete_yes_"))
-async def callback_delete_yes(callback: CallbackQuery):
+@router.message(LinkManagementStates.confirming_delete, F.text == "✅ Да, удалить")
+async def message_delete_yes(message: Message, state: FSMContext):
     """Обработчик подтвержденного удаления связи."""
-    try:
-        link_id = int(callback.data.split("_")[-1])
-    except ValueError:
-        await callback.answer("Ошибка: неверный ID связи", show_alert=True)
+    data = await state.get_data()
+    link_id = data.get("delete_link_id")
+    
+    if not link_id:
+        await message.answer("Ошибка: не найдена связь для удаления.")
+        await state.clear()
         return
     
-    user = await get_or_create_user(callback.from_user.id, callback.from_user.username)
+    user = await get_or_create_user(message.from_user.id, message.from_user.username)
     
     async with async_session_maker() as session:
         result = await session.execute(
@@ -1346,7 +1283,8 @@ async def callback_delete_yes(callback: CallbackQuery):
         link = result.scalar_one_or_none()
         
         if not link:
-            await callback.answer("Связь не найдена", show_alert=True)
+            await message.answer("Связь не найдена.")
+            await state.clear()
             return
         
         await session.delete(link)
@@ -1356,24 +1294,24 @@ async def callback_delete_yes(callback: CallbackQuery):
         
         text = f"🗑️ Связь #{link_id} удалена."
         keyboard = get_back_to_menu_keyboard()
-        await callback.message.edit_text(text, reply_markup=keyboard)
-        await callback.answer("Связь удалена")
+        await message.answer(text, reply_markup=keyboard)
+        await state.clear()
         logger.info("link_deleted", link_id=link_id, user_id=user.id)
 
 
-@router.callback_query(F.data.startswith("status_detail_"))
-async def callback_status_detail(callback: CallbackQuery):
+@router.message(LinkManagementStates.viewing_link_detail, F.text == "📊 Детальный статус")
+async def message_status_detail(message: Message, state: FSMContext):
     """Обработчик кнопки детального статуса связи."""
-    try:
-        link_id = int(callback.data.split("_")[-1])
-    except ValueError:
-        await callback.answer("Ошибка: неверный ID связи", show_alert=True)
+    data = await state.get_data()
+    link_id = data.get("current_link_id")
+    
+    if not link_id:
+        await message.answer("Ошибка: не найдена текущая связь.")
         return
     
-    user = await get_or_create_user(callback.from_user.id, callback.from_user.username)
+    user = await get_or_create_user(message.from_user.id, message.from_user.username)
     
     # Используем существующую функцию cmd_status_detail
-    # Но нужно адаптировать её для callback
     async with async_session_maker() as session:
         result = await session.execute(
             select(CrosspostingLink)
@@ -1387,7 +1325,7 @@ async def callback_status_detail(callback: CallbackQuery):
         link = result.scalar_one_or_none()
         
         if not link:
-            await callback.answer("Связь не найдена", show_alert=True)
+            await message.answer("Связь не найдена.")
             return
         
         # Статистика по связи
@@ -1440,7 +1378,6 @@ async def callback_status_detail(callback: CallbackQuery):
             text += f"\nПоследняя ошибка:\n{last_error_msg.error_message[:200]}\n"
         
         keyboard = get_link_detail_keyboard(link_id, link.is_enabled)
-        await callback.message.edit_text(text, reply_markup=keyboard)
-        await callback.answer()
+        await message.answer(text, reply_markup=keyboard)
 
 

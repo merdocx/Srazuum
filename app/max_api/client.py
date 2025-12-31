@@ -7,6 +7,7 @@ from app.utils.logger import get_logger
 from app.utils.retry import retry_with_backoff
 from app.utils.exceptions import APIError
 from app.utils.rate_limiter import max_api_limiter
+from app.utils.chat_id_converter import convert_chat_id
 
 logger = get_logger(__name__)
 
@@ -79,7 +80,14 @@ class MaxAPIClient:
         
         Returns:
             Информация об отправленном сообщении
+        
+        Raises:
+            APIError: Если текст пустой или при ошибке API
         """
+        # Проверяем, что текст не пустой
+        if not text or not text.strip():
+            raise APIError("Нельзя отправить пустое сообщение в MAX", status_code=400)
+        
         # Преобразуем chat_id в правильный формат для query parameter
         chat_id_value = convert_chat_id(chat_id)
         
@@ -296,15 +304,7 @@ class MaxAPIClient:
             Информация об отправленном сообщении
         """
         # Преобразуем chat_id в правильный формат для query parameter
-        try:
-            if isinstance(chat_id, str) and (chat_id.lstrip('-').isdigit() or chat_id.lstrip('-').replace('.', '').isdigit()):
-                chat_id_value = int(float(chat_id))
-            elif isinstance(chat_id, (int, float)):
-                chat_id_value = int(chat_id)
-            else:
-                chat_id_value = chat_id
-        except (ValueError, TypeError):
-            chat_id_value = chat_id
+        chat_id_value = convert_chat_id(chat_id)
         
         # ВАЖНО: MAX API требует загрузку файла через /uploads endpoint
         # Сначала загружаем файл, получаем token, затем используем его в content
@@ -466,15 +466,7 @@ class MaxAPIClient:
             Информация об отправленном сообщении
         """
         # Преобразуем chat_id в правильный формат для query parameter
-        try:
-            if isinstance(chat_id, str) and (chat_id.lstrip('-').isdigit() or chat_id.lstrip('-').replace('.', '').isdigit()):
-                chat_id_value = int(float(chat_id))
-            elif isinstance(chat_id, (int, float)):
-                chat_id_value = int(chat_id)
-            else:
-                chat_id_value = chat_id
-        except (ValueError, TypeError):
-            chat_id_value = chat_id
+        chat_id_value = convert_chat_id(chat_id)
         
         # ВАЖНО: MAX API требует загрузку файла через /uploads endpoint
         # Сначала загружаем файл, получаем token, затем используем его в attachments
@@ -621,9 +613,12 @@ class MaxAPIClient:
         """
         Отправить несколько фото в одном сообщении (альбом).
         
+        ВАЖНО: Нет ограничений на количество фото - отправляются ВСЕ файлы из списка.
+        Батчинг используется только для оптимизации загрузки, не для ограничения количества.
+        
         Args:
             chat_id: ID канала в MAX
-            local_file_paths: Список путей к локальным файлам фото
+            local_file_paths: Список путей к локальным файлам фото (без ограничений по количеству)
             caption: Подпись к альбому (будет только у первого фото в Telegram)
         
         Returns:
@@ -633,15 +628,7 @@ class MaxAPIClient:
             raise APIError("Список файлов пуст")
         
         # Преобразуем chat_id в правильный формат для query parameter
-        try:
-            if isinstance(chat_id, str) and (chat_id.lstrip('-').isdigit() or chat_id.lstrip('-').replace('.', '').isdigit()):
-                chat_id_value = int(float(chat_id))
-            elif isinstance(chat_id, (int, float)):
-                chat_id_value = int(chat_id)
-            else:
-                chat_id_value = chat_id
-        except (ValueError, TypeError):
-            chat_id_value = chat_id
+        chat_id_value = convert_chat_id(chat_id)
         
         try:
             # Батчинг загрузок медиа
@@ -754,9 +741,12 @@ class MaxAPIClient:
         """
         Отправить несколько видео в одном сообщении (альбом).
         
+        ВАЖНО: Нет ограничений на количество видео - отправляются ВСЕ файлы из списка.
+        Батчинг используется только для оптимизации загрузки, не для ограничения количества.
+        
         Args:
             chat_id: ID канала в MAX
-            local_file_paths: Список путей к локальным файлам видео
+            local_file_paths: Список путей к локальным файлам видео (без ограничений по количеству)
             caption: Подпись к альбому
             parse_mode: Режим парсинга (HTML, Markdown)
         
@@ -767,15 +757,7 @@ class MaxAPIClient:
             raise APIError("Список файлов пуст")
         
         # Преобразуем chat_id в правильный формат для query parameter
-        try:
-            if isinstance(chat_id, str) and (chat_id.lstrip('-').isdigit() or chat_id.lstrip('-').replace('.', '').isdigit()):
-                chat_id_value = int(float(chat_id))
-            elif isinstance(chat_id, (int, float)):
-                chat_id_value = int(chat_id)
-            else:
-                chat_id_value = chat_id
-        except (ValueError, TypeError):
-            chat_id_value = chat_id
+        chat_id_value = convert_chat_id(chat_id)
         
         try:
             # Батчинг загрузок медиа

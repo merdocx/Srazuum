@@ -75,6 +75,14 @@ class Settings(BaseSettings):
     enable_metrics: bool = True  # Включить сбор метрик
     metrics_export_interval: int = 60  # Интервал экспорта метрик (секунды)
     
+    # Миграция постов
+    migration_parallel_posts: int = 5  # Параллельно обрабатывать 5 постов
+    migration_batch_check_size: int = 1000  # Размер батча для проверки дублирования (если используется батчинг)
+    migration_batch_log_size: int = 100  # Размер батча для вставок в message_log
+    migration_progress_update_interval: int = 100  # Обновление прогресса каждые 100 постов
+    migration_progress_update_time: int = 300  # Обновление прогресса каждые 5 минут (секунды)
+    migration_streaming_enabled: bool = True  # Использовать потоковую обработку истории
+    
     class Config:
         env_file = ".env"
         case_sensitive = False

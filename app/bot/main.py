@@ -6,6 +6,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config.settings import settings
 from app.utils.logger import setup_logging, get_logger
 from app.bot.handlers import router, set_bot_instance
+# Импортируем handlers_migration для регистрации обработчиков
+import app.bot.handlers_migration
 
 logger = get_logger(__name__)
 
@@ -38,6 +40,7 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
     
     # Регистрация роутеров
+    # Обработчики миграции уже зарегистрированы в том же router через импорт
     dp.include_router(router)
     
     logger.info("bot_starting", bot_token=settings.telegram_bot_token[:10] + "...")
