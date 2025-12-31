@@ -27,3 +27,4 @@ def test_convert_string_non_numeric():
     result = convert_chat_id("abc")
     assert result == "abc"  # Возвращается как есть
 
+

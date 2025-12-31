@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     media_storage_path: str = "media/temp"  # Относительный путь
     media_public_url: str = "http://localhost:8080/media"  # Базовый URL для доступа к медиа
     media_cleanup_after_seconds: int = 1800  # Удалять файлы через 30 минут после создания (production)
-    media_max_file_size_mb: int = 100  # Увеличено для production
+    media_max_file_size_mb: int = 300  # Увеличено для production
     media_cleanup_interval_seconds: int = 1800  # Интервал автоматической очистки (30 минут)
     
     # API timeouts

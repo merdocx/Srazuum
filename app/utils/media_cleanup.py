@@ -38,3 +38,4 @@ async def periodic_media_cleanup():
             # Продолжаем работу даже при ошибке
             await asyncio.sleep(60)  # Короткая пауза перед следующей попыткой
 
+

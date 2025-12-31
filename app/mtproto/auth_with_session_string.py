@@ -152,3 +152,4 @@ if __name__ == "__main__":
         print("  python -m app.mtproto.auth_with_session_string auth [session_string]  # Авторизация")
 
 
+

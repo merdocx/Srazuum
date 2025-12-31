@@ -39,3 +39,4 @@ async def test_circuit_breaker_opens_after_failures():
         await breaker.call(fail_func)
     assert "Circuit breaker открыт" in str(exc_info.value)
 
+

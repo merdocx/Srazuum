@@ -132,3 +132,4 @@ class CircuitBreaker:
                 logger.info("circuit_breaker_reset")
         return _reset()
 
+

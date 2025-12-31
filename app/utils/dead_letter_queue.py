@@ -106,3 +106,4 @@ class DeadLetterQueue:
 # Глобальный экземпляр
 dlq = DeadLetterQueue(max_retries=settings.max_retry_attempts, retry_delay_minutes=5)
 
+

@@ -105,3 +105,4 @@ def apply_formatting(text: str, entities: Optional[List[MessageEntity]], parse_m
     # MAX API поддерживает markdown
     return formatted_text, "markdown"
 
+

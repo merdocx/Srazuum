@@ -92,3 +92,4 @@ await receiver.start(session_string="ваш_session_string")
 - После успешной авторизации сессия сохраняется в файл `.session` и может использоваться повторно
 
 
+

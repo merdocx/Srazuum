@@ -140,3 +140,4 @@ await receiver.start(session_string="ваш_session_string")
 - Попробуйте запросить код повторно через несколько минут
 
 
+
