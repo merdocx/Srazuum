@@ -30,18 +30,53 @@ class MTProtoReceiver:
         logger.info("Запуск MTProto Receiver...")
         
         try:
+            from pathlib import Path
+            
+            # Путь к файлу сессии
+            session_file = Path("crossposting_session.session")
+            session_string_file = Path("session_string.txt")
+            
             # Создаем клиент
-            # Если передан session string, используем его
+            # Приоритет: 1) переданный session_string, 2) файл session_string.txt, 3) файл сессии, 4) phone_number
             if session_string:
-                logger.info("Использование session string для авторизации")
+                logger.info("Использование переданного session string для авторизации")
                 self.client = Client(
                     "crossposting_session",
                     api_id=settings.telegram_api_id_int,
                     api_hash=settings.telegram_api_hash,
                     session_string=session_string
                 )
+            elif session_string_file.exists():
+                # Читаем session string из файла
+                logger.info(f"Чтение session string из файла: {session_string_file}")
+                with open(session_string_file, "r") as f:
+                    file_session_string = f.read().strip()
+                if file_session_string:
+                    logger.info("Использование session string из файла для авторизации")
+                    self.client = Client(
+                        "crossposting_session",
+                        api_id=settings.telegram_api_id_int,
+                        api_hash=settings.telegram_api_hash,
+                        session_string=file_session_string
+                    )
+                else:
+                    logger.warning("Файл session_string.txt пуст, используем файл сессии")
+                    self.client = Client(
+                        "crossposting_session",
+                        api_id=settings.telegram_api_id_int,
+                        api_hash=settings.telegram_api_hash
+                    )
+            elif session_file.exists():
+                # Используем существующий файл сессии (без phone_number)
+                logger.info(f"Использование существующего файла сессии: {session_file}")
+                self.client = Client(
+                    "crossposting_session",
+                    api_id=settings.telegram_api_id_int,
+                    api_hash=settings.telegram_api_hash
+                )
             else:
-                # Иначе используем phone_number для интерактивной авторизации
+                # Файла сессии нет, используем phone_number для интерактивной авторизации
+                logger.warning("Файл сессии не найден, требуется интерактивная авторизация")
                 self.client = Client(
                     "crossposting_session",
                     api_id=settings.telegram_api_id_int,

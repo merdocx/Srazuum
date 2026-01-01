@@ -31,6 +31,7 @@ from app.bot.keyboards import (
 )
 from config.database import async_session_maker
 from config.settings import settings
+from app.utils.cache import delete_cache
 
 logger = get_logger(__name__)
 router = Router()
@@ -280,7 +281,7 @@ async def message_add_channel(message: Message, state: FSMContext):
 
 @router.message(AddChannelStates.waiting_telegram_channel)
 async def process_telegram_channel(message: Message, state: FSMContext):
-    """Обработка Telegram канала."""
+    """Обработка Telegram канала. Принимаем только ссылки."""
     import re
     
     channel_id = None
@@ -294,7 +295,7 @@ async def process_telegram_channel(message: Message, state: FSMContext):
         channel_title = message.forward_from_chat.title or "Unknown"
         logger.info("telegram_channel_from_forward", channel_id=channel_id, username=channel_username)
     
-    # Вариант 2: Текст с username или ссылкой
+    # Вариант 2: Текст со ссылкой или username
     elif message.text:
         text = message.text.strip()
         
@@ -304,9 +305,6 @@ async def process_telegram_channel(message: Message, state: FSMContext):
         # Формат: @username
         if text.startswith("@"):
             username_match = text[1:]
-        # Формат: username (без @) - минимум 5 символов, максимум 32
-        elif re.match(r'^[a-zA-Z0-9_]{5,32}$', text):
-            username_match = text
         # Формат: https://t.me/username или t.me/username или telegram.me/username
         elif re.match(r'^(https?://)?(www\.)?(t\.me|telegram\.me)/', text, re.IGNORECASE):
             # Извлекаем username из ссылки
@@ -337,8 +335,9 @@ async def process_telegram_channel(message: Message, state: FSMContext):
                 "❌ Не удалось распознать канал.\n\n"
                 "Поддерживаемые форматы:\n"
                 "• Пересылка сообщения из канала\n"
-                "• @username или username\n"
-                "• https://t.me/username",
+                "• @username\n"
+                "• https://t.me/username\n\n"
+                "⚠️ Добавление по ID не поддерживается. Используйте ссылку или username.",
                 reply_markup=get_retry_keyboard("telegram_channel")
             )
             return
@@ -347,8 +346,9 @@ async def process_telegram_channel(message: Message, state: FSMContext):
         await message.answer(
             "❌ Пожалуйста, используйте один из способов:\n\n"
             "• Перешлите сообщение из канала\n"
-            "• Отправьте @username или username\n"
-            "• Отправьте ссылку https://t.me/username",
+            "• Отправьте @username\n"
+            "• Отправьте ссылку https://t.me/username\n\n"
+            "⚠️ Добавление по ID не поддерживается.",
             reply_markup=get_retry_keyboard("telegram_channel")
         )
         return
@@ -420,7 +420,7 @@ async def process_telegram_channel(message: Message, state: FSMContext):
         
         await message.answer(
             f"Telegram-канал '{channel_title}' добавлен.\n\n"
-            "Теперь отправьте ID или username вашего MAX-канала.",
+            "Теперь отправьте ссылку на ваш MAX-канал (например: https://max.ru/username).",
             reply_markup=get_back_to_menu_keyboard()
         )
 
@@ -434,10 +434,9 @@ async def process_max_channel(message: Message, state: FSMContext):
     
     if not user_input:
         await message.answer(
-            "❌ Пожалуйста, укажите MAX-канал одним из способов:\n\n"
-            "• ID канала (число)\n"
-            "• Username канала\n"
-            "• Ссылка на канал",
+            "❌ Пожалуйста, укажите ссылку на MAX-канал.\n\n"
+            "Формат: https://max.ru/username\n\n"
+            "⚠️ Добавление по ID не поддерживается. Используйте ссылку.",
             reply_markup=get_retry_keyboard("max_channel")
         )
         return
@@ -446,62 +445,56 @@ async def process_max_channel(message: Message, state: FSMContext):
     data = await state.get_data()
     telegram_channel_id = data.get("telegram_channel_id")
     
-    # Извлекаем идентификатор канала из различных форматов
+    # Извлекаем username из ссылки (только ссылки поддерживаются)
     max_channel_id = None
     channel_username = None
     is_from_link = False
     
-    # Проверяем, является ли это числовым ID
-    try:
-        numeric_id = int(user_input)
-        max_channel_id = str(numeric_id)  # Сохраняем как строку для единообразия
-        logger.info("max_channel_numeric_id", channel_id=max_channel_id)
-    except ValueError:
-        # Не числовой ID, проверяем другие форматы
-        # Формат: ссылка (https://max.ru/... или другие варианты)
-        if re.match(r'https?://', user_input, re.IGNORECASE):
-            is_from_link = True
-            # Извлекаем ID или username из ссылки
-            # Поддерживаем форматы:
-            # - https://max.ru/username
-            # - https://max.ru/channel/username
-            # - https://max.ru/channel/1234567890
-            # - https://max.ru/id1234567890_bot (боты)
-            
-            # Парсим URL
-            url_parts = user_input.split("/")
-            # Убираем query параметры и якоря
-            last_part = url_parts[-1].split("?")[0].split("#")[0]
-            
-            # Если последняя часть - это "channel", берем предыдущую
-            if last_part == "channel" and len(url_parts) >= 4:
-                last_part = url_parts[-2]
-            
-            # Пробуем как числовой ID
-            try:
-                numeric_id = int(last_part)
-                max_channel_id = str(numeric_id)
-                logger.info("max_channel_id_from_link", channel_id=max_channel_id, link=user_input)
-            except ValueError:
-                # Не ID, значит username
-                # Убираем префикс "id" если есть (для ботов)
-                if last_part.startswith("id") and last_part.endswith("_bot"):
-                    # Это бот, не канал
-                    await message.answer(
-                        "❌ Это ссылка на бота, а не на канал.\n\n"
-                        "Пожалуйста, укажите ссылку на MAX канал.",
-                        reply_markup=get_retry_keyboard("max_channel")
-                    )
-                    return
-                
-                channel_username = last_part
-                max_channel_id = last_part  # Используем как есть для поиска
-                logger.info("max_channel_username_from_link", username=channel_username, link=user_input)
-        else:
-            # Простой username или ID в виде строки
-            max_channel_id = user_input.lstrip('@')
-            channel_username = max_channel_id
-            logger.info("max_channel_username_or_string_id", value=user_input)
+    # Проверяем, является ли это ссылкой
+    if re.match(r'https?://', user_input, re.IGNORECASE):
+        is_from_link = True
+        # Извлекаем username из ссылки
+        # Поддерживаем форматы:
+        # - https://max.ru/username
+        # - https://max.ru/channel/username
+        
+        # Парсим URL
+        url_parts = user_input.split("/")
+        # Убираем query параметры и якоря
+        last_part = url_parts[-1].split("?")[0].split("#")[0]
+        
+        # Если последняя часть - это "channel", берем предыдущую
+        if last_part == "channel" and len(url_parts) >= 4:
+            last_part = url_parts[-2]
+        
+        # Проверяем, не бот ли это (только если заканчивается на _bot)
+        if last_part.endswith("_bot"):
+            # Это бот, не канал
+            await message.answer(
+                "❌ Это ссылка на бота, а не на канал.\n\n"
+                "Пожалуйста, укажите ссылку на MAX канал.",
+                reply_markup=get_retry_keyboard("max_channel")
+            )
+            return
+        
+        # Сохраняем полную ссылку для сравнения
+        channel_username = last_part
+        max_channel_id = last_part  # Используем для поиска
+        # Нормализуем ссылку для сравнения (убираем протокол и www)
+        normalized_user_link = re.sub(r'^https?://(?:www\.)?', '', user_input.lower()).rstrip('/')
+        logger.info("max_channel_from_link", 
+                  username=channel_username, 
+                  link=user_input,
+                  normalized_link=normalized_user_link)
+    else:
+        # Не ссылка - отклоняем
+        await message.answer(
+            "❌ Пожалуйста, укажите ссылку на MAX-канал.\n\n"
+            "Формат: https://max.ru/username\n\n"
+            "⚠️ Добавление по ID или username без ссылки не поддерживается.",
+            reply_markup=get_retry_keyboard("max_channel")
+        )
+        return
     
     async with async_session_maker() as session:
         # Создание или получение MAX канала
@@ -554,93 +547,60 @@ async def process_max_channel(message: Message, state: FSMContext):
                 
                 found_chat = None
                 
-                # Если это числовой ID, ищем по ID
-                if max_channel_id.isdigit():
-                    for chat in available_chats:
-                        chat_id = None
-                        if 'id' in chat:
-                            chat_id = str(chat['id'])
-                        elif 'chat_id' in chat:
-                            chat_id = str(chat['chat_id'])
-                        
-                        if chat_id == max_channel_id:
-                            found_chat = chat
-                            logger.info("max_channel_found_by_id", channel_id=max_channel_id, found_id=chat_id)
-                            break
+                # Ищем канал только по ссылке из поля 'link'
+                # Сравниваем полные ссылки (нормализованные)
+                # Нормализуем пользовательскую ссылку: убираем протокол, www, trailing slash
+                normalized_user_link = re.sub(r'^https?://(?:www\.)?', '', user_input.lower()).rstrip('/')
+                # Извлекаем последнюю часть (username/id) из пользовательской ссылки
+                user_link_part = normalized_user_link.split('/')[-1].split('?')[0].split('#')[0].lower()
+                
+                found_username_from_link = None
+                logger.info("searching_chat_by_link", 
+                          user_link=user_input,
+                          normalized_user_link=normalized_user_link,
+                          user_link_part=user_link_part,
+                          available_chats_count=len(available_chats))
+                
+                for idx, chat in enumerate(available_chats):
+                    match_found = False
+                    chat_username_raw = None
                     
-                    # Если не нашли в списке, пробуем прямой запрос
-                    if not found_chat:
-                        try:
-                            chat_info = await max_client.get_chat(max_channel_id)
-                            if chat_info:
-                                found_chat = chat_info
-                                logger.info("max_channel_found_by_direct_request", channel_id=max_channel_id)
-                        except APIError:
-                            # Если прямой запрос не сработал, продолжаем с поиском в списке
-                            pass
-                else:
-                    # Если это username, ищем в списке доступных чатов
-                    search_username = max_channel_id.lstrip('@').lower()
-                    logger.info("searching_chat_by_username", 
-                              search_username=search_username,
-                              available_chats_count=len(available_chats))
+                    # Ищем только по полю 'link' - сравниваем полные ссылки или последнюю часть
+                    if 'link' in chat and chat['link']:
+                        chat_link = chat['link']
+                        # Нормализуем ссылку из API (убираем протокол и www)
+                        normalized_chat_link = re.sub(r'^https?://(?:www\.)?', '', chat_link.lower()).rstrip('/')
+                        # Извлекаем последнюю часть из ссылки API
+                        chat_link_part = normalized_chat_link.split('/')[-1].split('?')[0].split('#')[0].lower()
+                        
+                        # Сравниваем либо полные нормализованные ссылки, либо последнюю часть URL
+                        match_found = (normalized_user_link == normalized_chat_link) or (user_link_part == chat_link_part)
+                        
+                        # Извлекаем username/id из ссылки для логирования и сохранения
+                        link_match = re.search(r'https?://(?:www\.)?max\.ru/([^/?#]+)', chat_link, re.IGNORECASE)
+                        if link_match:
+                            chat_username_raw = link_match.group(1)
                     
-                    for idx, chat in enumerate(available_chats):
-                        # Проверяем все возможные поля для username
-                        chat_username = None
-                        chat_username_raw = None
-                        match_found = False
-                        
-                        # 1. Проверяем поле 'username' (если есть)
-                        if 'username' in chat and chat['username']:
-                            chat_username_raw = chat['username']
-                            chat_username = str(chat['username']).lstrip('@').lower()
-                            match_found = (chat_username == search_username)
-                        
-                        # 2. Проверяем поле 'name' (если есть)
-                        if not match_found and 'name' in chat and chat['name']:
-                            chat_username_raw = chat['name']
-                            chat_username = str(chat['name']).lstrip('@').lower()
-                            match_found = (chat_username == search_username)
-                        
-                        # 3. Проверяем поле 'slug' (если есть)
-                        if not match_found and 'slug' in chat and chat['slug']:
-                            chat_username_raw = chat['slug']
-                            chat_username = str(chat['slug']).lstrip('@').lower()
-                            match_found = (chat_username == search_username)
-                        
-                        # 4. Извлекаем username из поля 'link' (https://max.ru/username)
-                        if not match_found and 'link' in chat and chat['link']:
-                            import re
-                            link = chat['link']
-                            # Извлекаем username из ссылки вида https://max.ru/username
-                            link_match = re.search(r'https?://(?:www\.)?max\.ru/([^/?#]+)', link, re.IGNORECASE)
-                            if link_match:
-                                link_username = link_match.group(1).lower()
-                                # Пропускаем служебные пути (id, channel и т.д.)
-                                if not link_username.startswith('id') and link_username != 'channel':
-                                    chat_username_raw = link_match.group(1)
-                                    chat_username = link_username
-                                    match_found = (chat_username == search_username)
-                        
-                        # Логируем сравнение для отладки
-                        logger.info("comparing_usernames", 
-                                    chat_index=idx,
-                                    search=search_username,
-                                    chat_username_raw=chat_username_raw,
-                                    chat_username_normalized=chat_username,
-                                    chat_link=chat.get('link'),
-                                    chat_keys=list(chat.keys()),
-                                    match=match_found)
-                        
-                        if match_found:
-                            found_chat = chat
-                            logger.info("max_channel_found_by_username", 
-                                      search_username=search_username,
-                                      found_username=chat_username_raw,
-                                      chat_id=chat.get('id') or chat.get('chat_id'),
-                                      chat_link=chat.get('link'))
-                            break
+                    # Логируем сравнение для отладки
+                    logger.info("comparing_by_link", 
+                                chat_index=idx,
+                                user_link=user_input,
+                                chat_link=chat.get('link'),
+                                normalized_user=normalized_user_link,
+                                normalized_chat=normalized_chat_link if 'link' in chat and chat['link'] else None,
+                                user_part=user_link_part,
+                                chat_part=chat_link_part if 'link' in chat and chat['link'] else None,
+                                match=match_found)
+                    
+                    if match_found:
+                        found_chat = chat
+                        found_username_from_link = chat_username_raw
+                        logger.info("max_channel_found_by_link", 
+                                  user_link=user_input,
+                                  found_link=chat.get('link'),
+                                  found_username=found_username_from_link,
+                                  chat_id=chat.get('id') or chat.get('chat_id'))
+                        break
                 
                 if found_chat:
                     # Если нашли канал, извлекаем все данные
@@ -655,21 +615,25 @@ async def process_max_channel(message: Message, state: FSMContext):
                     elif 'name' in found_chat:
                         channel_title = found_chat['name']
                     
-                    # Извлекаем username из разных источников
-                    if 'username' in found_chat and found_chat['username']:
-                        channel_username = str(found_chat['username']).lstrip('@')
-                    elif 'link' in found_chat and found_chat['link']:
-                        # Извлекаем username из ссылки https://max.ru/username
-                        import re
+                    # Извлекаем username из поля 'link' (https://max.ru/username или https://max.ru/id123_biz)
+                    # Это единственный надежный источник для сравнения
+                    if 'link' in found_chat and found_chat['link']:
                         link = found_chat['link']
                         link_match = re.search(r'https?://(?:www\.)?max\.ru/([^/?#]+)', link, re.IGNORECASE)
                         if link_match:
                             extracted_username = link_match.group(1)
-                            # Пропускаем служебные пути
-                            if not extracted_username.startswith('id') and extracted_username != 'channel':
+                            # Пропускаем только служебные пути, но не id*_biz или id*_bot (это валидные каналы)
+                            if extracted_username != 'channel':
                                 channel_username = extracted_username
-                    elif 'slug' in found_chat and found_chat['slug']:
-                        channel_username = str(found_chat['slug']).lstrip('@')
+                                logger.info("username_extracted_from_link", 
+                                          username=channel_username, 
+                                          link=link)
+                    
+                    # Если username не был извлечен из link, используем найденный при поиске
+                    if not channel_username and found_username_from_link:
+                        channel_username = found_username_from_link
+                    elif not channel_username:
+                        channel_username = max_channel_id
                     
                     logger.info("max_channel_found", 
                               original_input=max_channel_id,
@@ -681,30 +645,21 @@ async def process_max_channel(message: Message, state: FSMContext):
                     # Не нашли в списке доступных чатов
                     logger.warning("chat_not_found_in_available", 
                                  input=max_channel_id,
-                                 is_link=is_from_link,
+                                 link=user_input,
                                  available_chats_count=len(available_chats))
                     await max_client.close()
                     
-                    if is_from_link:
-                        error_msg = (
-                            f"❌ Не удалось найти канал по ссылке '{user_input}'.\n\n"
-                            "Возможные причины:\n"
-                            "• Бот не добавлен в канал как администратор\n"
-                            "• Ссылка указана неверно\n"
-                            "• Канал не существует или недоступен\n\n"
-                            "Убедитесь, что:\n"
-                            "1. Бот добавлен в канал как администратор\n"
-                            "2. Ссылка на канал указана правильно\n"
-                            "3. Канал существует в MAX"
-                        )
-                    else:
-                        error_msg = (
-                            f"❌ Не удалось найти канал '{max_channel_id}'.\n\n"
-                            "Проверьте:\n"
-                            "• Правильность username или ID\n"
-                            "• Что бот добавлен в канал как администратор\n"
-                            "• Что канал существует и доступен боту"
-                        )
+                    error_msg = (
+                        f"❌ Не удалось найти канал по ссылке '{user_input}'.\n\n"
+                        "Возможные причины:\n"
+                        "• Бот не добавлен в канал как администратор\n"
+                        "• Ссылка указана неверно\n"
+                        "• Канал не существует или недоступен\n\n"
+                        "Убедитесь, что:\n"
+                        "1. Бот добавлен в канал как администратор\n"
+                        "2. Ссылка на канал указана правильно (https://max.ru/username)\n"
+                        "3. Канал существует в MAX"
+                    )
                     
                     await message.answer(error_msg, reply_markup=get_retry_keyboard("max_channel"))
                     return
@@ -713,27 +668,23 @@ async def process_max_channel(message: Message, state: FSMContext):
                 logger.info("max_channel_info_retrieved", channel_id=actual_channel_id, title=channel_title, username=channel_username)
             except APIError as e:
                 logger.warning("failed_to_get_max_chat_info", channel_id=max_channel_id, error=str(e))
-                # Если не удалось получить информацию, но это числовой ID, продолжаем
-                if not max_channel_id.isdigit():
-                    await message.answer(
-                        f"❌ Не удалось найти канал '{max_channel_id}'.\n\n"
-                        "Проверьте:\n"
-                        "• Правильность ID или username\n"
-                        "• Что бот добавлен в канал как администратор\n"
-                        "• Что канал существует",
-                        reply_markup=get_retry_keyboard("max_channel")
-                    )
-                    return
+                await message.answer(
+                    f"❌ Не удалось найти канал по ссылке '{user_input}'.\n\n"
+                    "Проверьте:\n"
+                    "• Правильность ссылки (https://max.ru/username)\n"
+                    "• Что бот добавлен в канал как администратор\n"
+                    "• Что канал существует",
+                    reply_markup=get_retry_keyboard("max_channel")
+                )
+                return
             except Exception as e:
                 logger.warning("failed_to_get_max_chat_info", channel_id=max_channel_id, error=str(e))
-                # Если не удалось получить информацию, но это числовой ID, продолжаем
-                if not max_channel_id.isdigit():
-                    await message.answer(
-                        f"❌ Ошибка при получении информации о канале '{max_channel_id}'.\n\n"
-                        "Попробуйте использовать числовой ID канала.",
-                        reply_markup=get_retry_keyboard("max_channel")
-                    )
-                    return
+                await message.answer(
+                    f"❌ Ошибка при получении информации о канале '{user_input}'.\n\n"
+                    "Проверьте правильность ссылки на канал.",
+                    reply_markup=get_retry_keyboard("max_channel")
+                )
+                return
             
             # Используем actual_channel_id для сохранения
             max_channel = MaxChannel(
@@ -748,6 +699,20 @@ async def process_max_channel(message: Message, state: FSMContext):
         
         # Создание связи
         try:
+            # КРИТИЧНО: Загружаем telegram_channel из базы для получения channel_id
+            telegram_channel_result = await session.execute(
+                select(TelegramChannel).where(TelegramChannel.id == telegram_channel_id)
+            )
+            telegram_channel = telegram_channel_result.scalar_one_or_none()
+            
+            if not telegram_channel:
+                await message.answer(
+                    "❌ Ошибка: Telegram канал не найден в базе данных.",
+                    reply_markup=get_retry_keyboard("add_channel")
+                )
+                logger.error("telegram_channel_not_found_in_db", telegram_channel_id=telegram_channel_id)
+                return
+            
             crossposting_link = CrosspostingLink(
                 user_id=user.id,
                 telegram_channel_id=telegram_channel_id,
@@ -757,6 +722,13 @@ async def process_max_channel(message: Message, state: FSMContext):
             session.add(crossposting_link)
             await session.commit()
             await session.refresh(crossposting_link)
+            
+            # КРИТИЧНО: Очищаем кэш для канала при создании связи
+            # Используем channel_id из загруженного telegram_channel
+            if telegram_channel and telegram_channel.channel_id:
+                cache_key = f"channel_links:{telegram_channel.channel_id}"
+                await delete_cache(cache_key)
+                logger.info("cache_cleared_on_link_creation", channel_id=telegram_channel.channel_id, link_id=crossposting_link.id)
             
             await log_audit(
                 user.id,
@@ -781,11 +753,44 @@ async def process_max_channel(message: Message, state: FSMContext):
                 user_id=user.id
             )
         except Exception as e:
+            error_message = str(e)
+            error_type = type(e).__name__
+            
+            # Безопасно получаем ID каналов для логирования
+            tg_ch_id = telegram_channel_id if 'telegram_channel_id' in locals() else None
+            max_ch_id = max_channel.id if 'max_channel' in locals() else None
+            
+            # Определяем тип ошибки для более информативного сообщения
+            if "uq_telegram_max_channels" in error_message or "unique constraint" in error_message.lower() or "duplicate" in error_message.lower():
+                user_message = (
+                    "❌ Такая связь уже существует.\n\n"
+                    "Эта комбинация Telegram и MAX каналов уже связана.\n"
+                    "Используйте /list_channels для просмотра существующих связей."
+                )
+            elif "foreign key" in error_message.lower() or "constraint" in error_message.lower():
+                user_message = (
+                    "❌ Ошибка при создании связи.\n\n"
+                    "Проверьте, что оба канала существуют в системе."
+                )
+            else:
+                user_message = (
+                    f"❌ Ошибка при создании связи.\n\n"
+                    f"Тип ошибки: {error_type}\n"
+                    "Попробуйте позже или обратитесь в поддержку."
+                )
+            
             await message.answer(
-                "❌ Ошибка при создании связи. Возможно, такая связь уже существует.",
+                user_message,
                 reply_markup=get_retry_keyboard("add_channel")
             )
-            logger.error("failed_to_create_link", error=str(e))
+            logger.error(
+                "failed_to_create_link",
+                error=error_message,
+                error_type=error_type,
+                telegram_channel_id=tg_ch_id,
+                max_channel_id=max_ch_id,
+                exc_info=True
+            )
         
         await state.clear()
 
@@ -1019,6 +1024,9 @@ async def cmd_enable(message: Message):
     async with async_session_maker() as session:
         result = await session.execute(
             select(CrosspostingLink)
+            .options(
+                selectinload(CrosspostingLink.telegram_channel)
+            )
             .where(CrosspostingLink.id == link_id)
             .where(CrosspostingLink.user_id == user.id)
         )
@@ -1028,8 +1036,19 @@ async def cmd_enable(message: Message):
             await message.answer("Связь не найдена.")
             return
         
+        # КРИТИЧНО: Сохраняем channel_id перед изменением для очистки кэша
+        telegram_channel_id_for_cache = None
+        if link.telegram_channel:
+            telegram_channel_id_for_cache = link.telegram_channel.channel_id
+        
         link.is_enabled = True
         await session.commit()
+        
+        # КРИТИЧНО: Очищаем кэш для канала при изменении статуса связи
+        if telegram_channel_id_for_cache:
+            cache_key = f"channel_links:{telegram_channel_id_for_cache}"
+            await delete_cache(cache_key)
+            logger.info("cache_cleared_on_link_enable", channel_id=telegram_channel_id_for_cache, link_id=link_id)
         
         await log_audit(user.id, AuditAction.ENABLE_LINK.value, "crossposting_link", link_id)
         
@@ -1056,6 +1075,9 @@ async def cmd_disable(message: Message):
     async with async_session_maker() as session:
         result = await session.execute(
             select(CrosspostingLink)
+            .options(
+                selectinload(CrosspostingLink.telegram_channel)
+            )
             .where(CrosspostingLink.id == link_id)
             .where(CrosspostingLink.user_id == user.id)
         )
@@ -1065,8 +1087,19 @@ async def cmd_disable(message: Message):
             await message.answer("Связь не найдена.")
             return
         
+        # КРИТИЧНО: Сохраняем channel_id перед изменением для очистки кэша
+        telegram_channel_id_for_cache = None
+        if link.telegram_channel:
+            telegram_channel_id_for_cache = link.telegram_channel.channel_id
+        
         link.is_enabled = False
         await session.commit()
+        
+        # КРИТИЧНО: Очищаем кэш для канала при изменении статуса связи
+        if telegram_channel_id_for_cache:
+            cache_key = f"channel_links:{telegram_channel_id_for_cache}"
+            await delete_cache(cache_key)
+            logger.info("cache_cleared_on_link_disable", channel_id=telegram_channel_id_for_cache, link_id=link_id)
         
         await log_audit(user.id, AuditAction.DISABLE_LINK.value, "crossposting_link", link_id)
         
@@ -1102,8 +1135,20 @@ async def cmd_delete(message: Message):
             await message.answer("Связь не найдена.")
             return
         
+        # КРИТИЧНО: Сохраняем channel_id перед удалением для очистки кэша
+        telegram_channel_id_for_cache = None
+        if link.telegram_channel:
+            await session.refresh(link.telegram_channel)
+            telegram_channel_id_for_cache = link.telegram_channel.channel_id
+        
         await session.delete(link)
         await session.commit()
+        
+        # КРИТИЧНО: Очищаем кэш для канала при удалении связи
+        if telegram_channel_id_for_cache:
+            cache_key = f"channel_links:{telegram_channel_id_for_cache}"
+            await delete_cache(cache_key)
+            logger.info("cache_cleared_on_link_delete", channel_id=telegram_channel_id_for_cache, link_id=link_id)
         
         await log_audit(user.id, AuditAction.DELETE_LINK.value, "crossposting_link", link_id)
         
@@ -1147,8 +1192,19 @@ async def message_enable(message: Message, state: FSMContext):
             await message.answer("Связь уже включена.")
             return
         
+        # КРИТИЧНО: Сохраняем channel_id перед изменением для очистки кэша
+        telegram_channel_id_for_cache = None
+        if link.telegram_channel:
+            telegram_channel_id_for_cache = link.telegram_channel.channel_id
+        
         link.is_enabled = True
         await session.commit()
+        
+        # КРИТИЧНО: Очищаем кэш для канала при изменении статуса связи
+        if telegram_channel_id_for_cache:
+            cache_key = f"channel_links:{telegram_channel_id_for_cache}"
+            await delete_cache(cache_key)
+            logger.info("cache_cleared_on_link_enable", channel_id=telegram_channel_id_for_cache, link_id=link_id)
         
         await log_audit(user.id, AuditAction.ENABLE_LINK.value, "crossposting_link", link_id)
         
@@ -1199,8 +1255,19 @@ async def message_disable(message: Message, state: FSMContext):
             await message.answer("Связь уже отключена.")
             return
         
+        # КРИТИЧНО: Сохраняем channel_id перед изменением для очистки кэша
+        telegram_channel_id_for_cache = None
+        if link.telegram_channel:
+            telegram_channel_id_for_cache = link.telegram_channel.channel_id
+        
         link.is_enabled = False
         await session.commit()
+        
+        # КРИТИЧНО: Очищаем кэш для канала при изменении статуса связи
+        if telegram_channel_id_for_cache:
+            cache_key = f"channel_links:{telegram_channel_id_for_cache}"
+            await delete_cache(cache_key)
+            logger.info("cache_cleared_on_link_disable", channel_id=telegram_channel_id_for_cache, link_id=link_id)
         
         await log_audit(user.id, AuditAction.DISABLE_LINK.value, "crossposting_link", link_id)
         
@@ -1287,8 +1354,20 @@ async def message_delete_yes(message: Message, state: FSMContext):
             await state.clear()
             return
         
+        # КРИТИЧНО: Сохраняем channel_id перед удалением для очистки кэша
+        telegram_channel_id_for_cache = None
+        if link.telegram_channel:
+            await session.refresh(link.telegram_channel)
+            telegram_channel_id_for_cache = link.telegram_channel.channel_id
+        
         await session.delete(link)
         await session.commit()
+        
+        # КРИТИЧНО: Очищаем кэш для канала при удалении связи
+        if telegram_channel_id_for_cache:
+            cache_key = f"channel_links:{telegram_channel_id_for_cache}"
+            await delete_cache(cache_key)
+            logger.info("cache_cleared_on_link_delete", channel_id=telegram_channel_id_for_cache, link_id=link_id)
         
         await log_audit(user.id, AuditAction.DELETE_LINK.value, "crossposting_link", link_id)
         

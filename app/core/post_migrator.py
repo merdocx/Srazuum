@@ -11,9 +11,7 @@ from pyrogram.types import Message as PyrogramMessage
 
 from app.models.crossposting_link import CrosspostingLink
 from app.models.message_log import MessageLog
-from app.models.telegram_channel import TelegramChannel
 from app.core.message_processor import MessageProcessor
-from app.core.migration_queue import migration_queue
 from app.utils.logger import get_logger
 from app.utils.enums import MessageStatus
 from config.database import async_session_maker
@@ -36,7 +34,6 @@ class PostMigrator:
         self.pyrogram_client = pyrogram_client
         self.message_processor = message_processor
         self.semaphore = asyncio.Semaphore(settings.migration_parallel_posts)
-        self.max_retry_attempts = 1  # 1 попытка без ретраев
     
     async def migrate_link_posts(
         self,
@@ -61,6 +58,11 @@ class PostMigrator:
             "failed": 0
         }
         
+        # Приостанавливаем кросспостинг для связи на время миграции
+        link_was_enabled = None
+        telegram_channel_db_id = None
+        telegram_channel_id = None
+        chat_identifier = None
         try:
             # Получаем информацию о связи
             async with async_session_maker() as session:
@@ -81,6 +83,17 @@ class PostMigrator:
                 telegram_channel_id = link.telegram_channel.channel_id
                 telegram_channel_db_id = link.telegram_channel.id
                 
+                # Приостанавливаем кросспостинг
+                link_was_enabled = link.is_enabled
+                if link_was_enabled:
+                    link.is_enabled = False
+                    await session.commit()
+                    # Очищаем кэш связей для этого канала
+                    from app.utils.cache import delete_cache
+                    cache_key = f"channel_links:{telegram_channel_db_id}"
+                    await delete_cache(cache_key)
+                    logger.info("crossposting_paused_for_migration", link_id=link_id, telegram_channel_db_id=telegram_channel_db_id)
+                
                 logger.info(
                     "migration_link_info",
                     link_id=link_id,
@@ -89,7 +102,6 @@ class PostMigrator:
                 )
                 
                 # Определяем идентификатор канала для Pyrogram
-                chat_identifier = None
                 if link.telegram_channel.channel_username:
                     chat_identifier = f"@{link.telegram_channel.channel_username}"
                 else:
@@ -107,6 +119,11 @@ class PostMigrator:
                 existing_message_ids = await self._load_existing_messages_cache(link_id, session)
             logger.info("existing_messages_loaded", count=len(existing_message_ids))
             
+            # Проверяем, что chat_identifier определен
+            if not chat_identifier:
+                logger.error("chat_identifier_not_defined", link_id=link_id)
+                return stats
+            
             # Получаем историю постов потоком
             all_messages = []
             async for message in self._get_chat_history_stream(chat_identifier):
@@ -116,12 +133,11 @@ class PostMigrator:
             logger.info("chat_history_loaded", total_messages=stats["total"])
             
             if stats["total"] == 0:
-                # Обработка постов из очереди
-                await self._process_queued_messages(link_id)
+                logger.info("no_messages_to_migrate", link_id=link_id)
                 return stats
             
             # ОПТИМИЗАЦИЯ: Предварительная группировка медиа-групп
-            grouped_messages, standalone_messages = await self._group_messages_by_media_group(all_messages)
+            grouped_messages, standalone_messages = self._group_messages_by_media_group(all_messages)
             
             logger.info(
                 "messages_grouped",
@@ -131,134 +147,124 @@ class PostMigrator:
                 standalone_messages=len(standalone_messages)
             )
             
-            # Обрабатываем медиа-группы и отдельные посты
+            # КРИТИЧНО: Объединяем медиа-группы и отдельные посты в один список для сохранения хронологического порядка
+            # Создаем список элементов для обработки: каждая медиа-группа и каждый отдельный пост
+            items_to_process = []
+            
+            # Добавляем медиа-группы (используем дату первого сообщения в группе)
+            for group in grouped_messages:
+                group_date = min(msg.date if msg.date else datetime.min for msg in group)
+                items_to_process.append({
+                    "type": "media_group",
+                    "date": group_date,
+                    "group": group
+                })
+            
+            # Добавляем отдельные посты
+            for msg in standalone_messages:
+                items_to_process.append({
+                    "type": "standalone",
+                    "date": msg.date if msg.date else datetime.min,
+                    "message": msg
+                })
+            
+            # КРИТИЧНО: Сортируем все элементы по дате (от старых к новым) для сохранения порядка
+            items_to_process_sorted = sorted(
+                items_to_process,
+                key=lambda item: item["date"]
+            )
+            
+            logger.info(
+                "items_sorted_for_migration",
+                link_id=link_id,
+                total_items=len(items_to_process_sorted),
+                media_groups=len(grouped_messages),
+                standalone_messages=len(standalone_messages)
+            )
+            
+            # Обрабатываем все элементы в хронологическом порядке
             processed_count = 0
             last_progress_update = start_time
             
-            # Обрабатываем медиа-группы
-            for group in grouped_messages:
-                processed_count += len(group)
-                
-                # Проверка на дублирование для медиа-группы
-                group_ids = {msg.id for msg in group}
-                if any(msg_id in existing_message_ids for msg_id in group_ids):
-                    stats["skipped"] += len(group)
-                    logger.debug("media_group_skipped_duplicate", group_size=len(group))
-                    continue
-                
-                # Обработка медиа-группы
-                try:
-                    # Конвертируем группу в формат для MessageProcessor
-                    primary_message = group[0]
-                    message_data = await self._convert_message(primary_message)
+            for item in items_to_process_sorted:
+                if item["type"] == "media_group":
+                    # Обработка медиа-группы
+                    group = item["group"]
+                    processed_count += len(group)
                     
-                    # Обрабатываем медиа-группу через MessageProcessor
-                    await self.message_processor._process_media_group(
-                        group,
-                        client=self.pyrogram_client,
-                        link_id=link_id
+                    # Проверка на дублирование для медиа-группы
+                    group_ids = {msg.id for msg in group}
+                    if any(msg_id in existing_message_ids for msg_id in group_ids):
+                        stats["skipped"] += len(group)
+                        logger.debug("media_group_skipped_duplicate", group_size=len(group))
+                        continue
+                    
+                    # Обработка медиа-группы
+                    try:
+                        # Обрабатываем медиа-группу через MessageProcessor
+                        await self.message_processor._process_media_group(
+                            group,
+                            client=self.pyrogram_client,
+                            link_id=link_id
+                        )
+                        
+                        # Добавляем все ID группы в кэш
+                        for msg in group:
+                            existing_message_ids.add(msg.id)
+                        
+                        stats["success"] += len(group)
+                        logger.info("media_group_migrated", group_size=len(group), link_id=link_id)
+                        
+                    except Exception as e:
+                        stats["failed"] += len(group)
+                        logger.error("media_group_migration_failed", error=str(e), group_size=len(group), exc_info=True)
+                
+                elif item["type"] == "standalone":
+                    # Обработка отдельного поста
+                    msg = item["message"]
+                    processed_count += 1
+                    
+                    # Пропускаем пустые сообщения (без текста, caption и медиа)
+                    has_content = bool(msg.text or msg.caption or msg.photo or msg.video or msg.document or msg.audio or msg.voice or msg.sticker)
+                    
+                    logger.info(
+                        "processing_post",
+                        message_id=msg.id,
+                        link_id=link_id,
+                        processed=processed_count,
+                        total=len(items_to_process_sorted),
+                        has_text=bool(msg.text),
+                        has_caption=bool(msg.caption),
+                        has_photo=bool(msg.photo),
+                        has_video=bool(msg.video),
+                        has_content=has_content
                     )
                     
-                    # Добавляем все ID группы в кэш
-                    for msg in group:
-                        existing_message_ids.add(msg.id)
-                    
-                    stats["success"] += len(group)
-                    logger.info("media_group_migrated", group_size=len(group), link_id=link_id)
-                    
-                except Exception as e:
-                    stats["failed"] += len(group)
-                    logger.error("media_group_migration_failed", error=str(e), group_size=len(group), exc_info=True)
-                
-                # Периодические обновления прогресса
-                if progress_callback and (
-                    processed_count % settings.migration_progress_update_interval == 0 or
-                    (datetime.utcnow() - last_progress_update).total_seconds() >= settings.migration_progress_update_time
-                ):
-                    await progress_callback(processed_count, stats["success"], stats["skipped"], stats["failed"])
-                    last_progress_update = datetime.utcnow()
-            
-            # КРИТИЧНО: Сортируем отдельные посты по дате (от старых к новым) для сохранения порядка
-            standalone_messages_sorted = sorted(
-                standalone_messages,
-                key=lambda m: m.date if m.date else datetime.min
-            )
-            
-            # Обрабатываем отдельные посты последовательно для сохранения порядка
-            standalone_to_process = [
-                msg for msg in standalone_messages_sorted
-                if msg.id not in existing_message_ids
-            ]
-            
-            logger.info(
-                "processing_standalone_messages",
-                link_id=link_id,
-                total_standalone=len(standalone_to_process),
-                telegram_channel_id=telegram_channel_id
-            )
-            
-            logs_to_create = []
-            
-            # Последовательная обработка для сохранения порядка постов
-            for idx, msg in enumerate(standalone_to_process, 1):
-                processed_count += 1
-                
-                # Пропускаем пустые сообщения (без текста, caption и медиа)
-                has_content = bool(msg.text or msg.caption or msg.photo or msg.video or msg.document or msg.audio or msg.voice or msg.sticker)
-                
-                logger.info(
-                    "processing_post",
-                    message_id=msg.id,
-                    link_id=link_id,
-                    processed=idx,
-                    total=len(standalone_to_process),
-                    has_text=bool(msg.text),
-                    has_caption=bool(msg.caption),
-                    has_photo=bool(msg.photo),
-                    has_video=bool(msg.video),
-                    has_content=has_content
-                )
-                
-                # Пропускаем пустые сообщения
-                if not has_content:
-                    stats["skipped"] += 1
-                    logger.info("post_skipped_empty", message_id=msg.id, link_id=link_id, processed=idx, total=len(standalone_to_process))
-                    continue
-                
-                try:
-                    # Обработка с semaphore для контроля параллелизма (но последовательно)
-                    async with self.semaphore:
-                        result = await self._process_single_post(
-                            msg, link_id, telegram_channel_db_id, existing_message_ids
-                        )
-                    
-                    if result:
-                        stats["success"] += 1
-                        existing_message_ids.add(msg.id)
-                        # Собираем данные для батчинга вставок в message_log
-                        logs_to_create.append({
-                            "crossposting_link_id": link_id,
-                            "telegram_channel_id": telegram_channel_db_id,
-                            "telegram_message_id": msg.id,
-                            "status": MessageStatus.SUCCESS.value,
-                            "message_type": self._get_message_type(msg),
-                            "created_at": datetime.utcnow(),
-                            "sent_at": datetime.utcnow()
-                        })
-                        logger.info("post_migrated_success", message_id=msg.id, link_id=link_id, processed=idx, total=len(standalone_to_process))
-                    else:
+                    # Пропускаем пустые сообщения
+                    if not has_content:
                         stats["skipped"] += 1
-                        logger.info("post_skipped", message_id=msg.id, link_id=link_id, processed=idx, total=len(standalone_to_process))
+                        logger.info("post_skipped_empty", message_id=msg.id, link_id=link_id, processed=processed_count, total=len(items_to_process_sorted))
+                        continue
+                    
+                    try:
+                        # Обработка с semaphore для контроля параллелизма (но последовательно)
+                        async with self.semaphore:
+                            result = await self._process_single_post(
+                                msg, link_id, telegram_channel_db_id, existing_message_ids
+                            )
                         
-                except Exception as e:
-                    stats["failed"] += 1
-                    logger.error("post_migration_failed", message_id=msg.id, error=str(e), exc_info=True, processed=idx, total=len(standalone_to_process))
-                    # Продолжаем обработку следующих постов даже при ошибке
-                
-                # Батчинг создания записей в message_log (каждые N записей)
-                if len(logs_to_create) >= settings.migration_batch_log_size:
-                    await self._batch_create_message_logs(logs_to_create)
-                    logs_to_create = []
+                        if result:
+                            stats["success"] += 1
+                            existing_message_ids.add(msg.id)
+                            logger.info("post_migrated_success", message_id=msg.id, link_id=link_id, processed=processed_count, total=len(items_to_process_sorted))
+                        else:
+                            stats["skipped"] += 1
+                            logger.info("post_skipped", message_id=msg.id, link_id=link_id, processed=processed_count, total=len(items_to_process_sorted))
+                            
+                    except Exception as e:
+                        stats["failed"] += 1
+                        logger.error("post_migration_failed", message_id=msg.id, error=str(e), exc_info=True, processed=processed_count, total=len(items_to_process_sorted))
+                        # Продолжаем обработку следующих постов даже при ошибке
                 
                 # Периодические обновления прогресса
                 if progress_callback and (
@@ -267,10 +273,6 @@ class PostMigrator:
                 ):
                     await progress_callback(processed_count, stats["success"], stats["skipped"], stats["failed"])
                     last_progress_update = datetime.utcnow()
-            
-            # Обрабатываем оставшиеся логи
-            if logs_to_create:
-                await self._batch_create_message_logs(logs_to_create)
             
             logger.info(
                 "migration_completed",
@@ -288,9 +290,36 @@ class PostMigrator:
             end_time = datetime.utcnow()
             stats["duration"] = (end_time - start_time).total_seconds()
         finally:
-            # Остановить миграцию и обработать очередь
-            await migration_queue.stop_migration(link_id)
-            await self._process_queued_messages(link_id)
+            # Восстанавливаем кросспостинг для связи (включаем обратно, если был включен до миграции)
+            if link_was_enabled is not None:
+                async with async_session_maker() as session:
+                    result = await session.execute(
+                        select(CrosspostingLink).where(CrosspostingLink.id == link_id)
+                    )
+                    link = result.scalar_one_or_none()
+                    if link:
+                        if link_was_enabled:
+                            # Включаем обратно, если был включен до миграции
+                            link.is_enabled = True
+                            await session.commit()
+                            # Очищаем кэш связей для этого канала, чтобы обновить список активных связей
+                            if telegram_channel_db_id:
+                                from app.utils.cache import delete_cache
+                                cache_key = f"channel_links:{telegram_channel_db_id}"
+                                await delete_cache(cache_key)
+                            logger.info("crossposting_resumed_after_migration", link_id=link_id, telegram_channel_db_id=telegram_channel_db_id)
+                        else:
+                            # Оставляем отключенным, если был отключен до миграции
+                            logger.info("crossposting_remains_disabled_after_migration", link_id=link_id)
+            
+            # Очищаем старые медиа-файлы (старше 1 часа) после завершения миграции
+            try:
+                from app.utils.media_handler import cleanup_old_media_files
+                deleted_count = await cleanup_old_media_files(max_age_hours=1)
+                if deleted_count > 0:
+                    logger.info("old_media_cleaned_after_migration", deleted_count=deleted_count, link_id=link_id)
+            except Exception as cleanup_error:
+                logger.warning("failed_to_cleanup_old_media_after_migration", error=str(cleanup_error), link_id=link_id)
         
         # Убеждаемся, что duration установлен
         if "duration" not in stats:
@@ -350,7 +379,7 @@ class PostMigrator:
         )
         return set(result.scalars().all())
     
-    async def _group_messages_by_media_group(
+    def _group_messages_by_media_group(
         self,
         messages: List[PyrogramMessage]
     ) -> tuple[List[List[PyrogramMessage]], List[PyrogramMessage]]:
@@ -407,8 +436,8 @@ class PostMigrator:
             return False
         
         try:
-            # Конвертируем сообщение
-            message_data = await self._convert_message(message)
+            # Конвертируем сообщение с загрузкой медиа
+            message_data = await self._convert_message(message, client=self.pyrogram_client)
             
             logger.debug(
                 "calling_process_message",
@@ -439,120 +468,109 @@ class PostMigrator:
             logger.error("failed_to_process_single_post", message_id=message.id, error=str(e), exc_info=True)
             return False
     
-    async def _convert_message(self, message: PyrogramMessage) -> Dict[str, Any]:
+    async def _convert_message(self, message: PyrogramMessage, client=None) -> Dict[str, Any]:
         """
         Конвертировать Pyrogram сообщение в формат для MessageProcessor.
         
         Args:
             message: Pyrogram сообщение
+            client: Pyrogram клиент для загрузки медиа (опционально)
         
         Returns:
             Словарь с данными сообщения
         """
+        from app.utils.media_handler import download_and_store_media
+        
         message_data = {
             "message_id": message.id,
             "date": message.date,
             "text": message.text or "",
             "caption": message.caption or "",
+            "type": "text",  # Используем строковые значения напрямую
             "photo": None,
             "video": None,
             "document": None,
             "media_group_id": getattr(message, 'media_group_id', None)
         }
         
+        # Определение типа сообщения и загрузка медиа
         if message.photo:
+            message_data["type"] = "photo"
             message_data["photo"] = message.photo
+            # Обрабатываем форматирование caption, если есть
+            if message.caption_entities:
+                from app.utils.text_formatter import apply_formatting
+                formatted_caption, caption_parse_mode = apply_formatting(
+                    message.caption or "",
+                    message.caption_entities
+                )
+                message_data["caption"] = formatted_caption
+                message_data["caption_parse_mode"] = caption_parse_mode
+            else:
+                message_data["caption"] = message.caption
+            
+            # Скачиваем фото если есть client
+            if client:
+                try:
+                    photo_url, local_file_path = await download_and_store_media(client, message, "photo")
+                    if photo_url:
+                        message_data["photo_url"] = photo_url
+                        message_data["local_file_path"] = local_file_path
+                    else:
+                        message_data["photo_url"] = None
+                except Exception as e:
+                    logger.error("failed_to_download_photo_in_migration", message_id=message.id, error=str(e), exc_info=True)
+                    message_data["photo_url"] = None
         elif message.video:
+            message_data["type"] = "video"
             message_data["video"] = message.video
+            # Обрабатываем форматирование caption, если есть
+            if message.caption_entities:
+                from app.utils.text_formatter import apply_formatting
+                formatted_caption, caption_parse_mode = apply_formatting(
+                    message.caption or "",
+                    message.caption_entities
+                )
+                message_data["caption"] = formatted_caption
+                message_data["parse_mode"] = caption_parse_mode
+            else:
+                message_data["caption"] = message.caption
+            
+            # Скачиваем видео если есть client
+            if client:
+                try:
+                    video_url, local_file_path = await download_and_store_media(client, message, "video")
+                    if video_url and local_file_path:
+                        message_data["video_url"] = video_url
+                        message_data["local_file_path"] = local_file_path
+                    else:
+                        message_data["video_url"] = None
+                        message_data["local_file_path"] = None
+                except Exception as e:
+                    logger.error("failed_to_download_video_in_migration", message_id=message.id, error=str(e), exc_info=True)
+                    message_data["video_url"] = None
+                    message_data["local_file_path"] = None
         elif message.document:
+            message_data["type"] = "document"
             message_data["document"] = message.document
+            message_data["caption"] = message.caption
+        elif message.audio:
+            message_data["type"] = "audio"
+            message_data["caption"] = message.caption
+        elif message.voice:
+            message_data["type"] = "voice"
+        elif message.sticker:
+            message_data["type"] = "sticker"
         
-        # Обработка форматирования
-        if message.caption_entities:
+        # Обработка форматирования текста (для текстовых сообщений)
+        if message.entities and not message.photo and not message.video:
             from app.utils.text_formatter import apply_formatting
-            formatted_caption, parse_mode = apply_formatting(
-                message.caption or "",
-                message.caption_entities
+            formatted_text, parse_mode = apply_formatting(
+                message_data.get("text", ""),
+                message.entities
             )
-            message_data["caption"] = formatted_caption
-            message_data["caption_parse_mode"] = parse_mode
+            message_data["text"] = formatted_text
+            message_data["parse_mode"] = parse_mode
         
         return message_data
     
-    def _get_message_type(self, message: PyrogramMessage) -> str:
-        """Определить тип сообщения."""
-        if message.photo:
-            return "photo"
-        elif message.video:
-            return "video"
-        elif message.document:
-            return "document"
-        else:
-            return "text"
-    
-    async def _batch_create_message_logs(self, logs_data: List[Dict[str, Any]]) -> None:
-        """
-        Создать записи в message_log батчами.
-        
-        КРИТИЧНО: Батчинг вставок в БД (по 100 записей).
-        
-        Args:
-            logs_data: Список данных для создания записей
-        """
-        if not logs_data:
-            return
-        
-        async with async_session_maker() as session:
-            batch_size = settings.migration_batch_log_size
-            
-            for i in range(0, len(logs_data), batch_size):
-                batch = logs_data[i:i + batch_size]
-                session.add_all([MessageLog(**log_data) for log_data in batch])
-                await session.commit()
-            
-            logger.debug("message_logs_created_batch", count=len(logs_data))
-    
-    async def _process_queued_messages(self, link_id: int) -> None:
-        """
-        Обработать сообщения из очереди после миграции.
-        
-        Args:
-            link_id: ID связи
-        """
-        queued_messages = await migration_queue.get_queued_messages(link_id)
-        
-        if not queued_messages:
-            return
-        
-        logger.info("processing_queued_messages", link_id=link_id, count=len(queued_messages))
-        
-        # Получаем информацию о связи
-        async with async_session_maker() as session:
-            result = await session.execute(
-                select(CrosspostingLink)
-                .where(CrosspostingLink.id == link_id)
-                .options(selectinload(CrosspostingLink.telegram_channel))
-            )
-            link = result.scalar_one_or_none()
-            
-            if not link:
-                logger.error("link_not_found_for_queue_processing", link_id=link_id)
-                return
-            
-            telegram_channel_db_id = link.telegram_channel.id
-        
-        # Обрабатываем сообщения из очереди
-        for message_data in queued_messages:
-            try:
-                await self.message_processor.process_message(
-                    telegram_channel_id=telegram_channel_db_id,
-                    telegram_message_id=message_data.get("message_id"),
-                    message_data=message_data,
-                    link_id=link_id
-                )
-            except Exception as e:
-                logger.error("failed_to_process_queued_message", error=str(e))
-        
-        # Очищаем очередь
-        await migration_queue.clear_queue(link_id)
-        logger.info("queued_messages_processed", link_id=link_id, count=len(queued_messages))

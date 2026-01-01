@@ -13,13 +13,12 @@ from app.models.failed_message import FailedMessage
 from app.max_api.client import MaxAPIClient
 from app.utils.logger import get_logger
 from app.utils.cache import get_cache, set_cache, delete_cache
-from app.utils.enums import MessageStatus, MessageType
+from app.utils.enums import MessageStatus
 from app.utils.exceptions import APIError, DatabaseError, MediaProcessingError
 from app.utils.rate_limiter import max_api_limiter
 from app.utils.circuit_breaker import CircuitBreaker
 from app.utils.metrics import metrics_collector, record_operation_time
 from app.utils.chat_id_converter import convert_chat_id
-from app.core.migration_queue import migration_queue
 from config.database import async_session_maker
 from config.settings import settings
 
@@ -65,62 +64,81 @@ class MessageProcessor:
         async with async_session_maker() as session:
             async with session.begin():
                 try:
-                    # Получаем активные связи с eager loading для оптимизации
-                    cache_key = f"channel_links:{telegram_channel_id}"
-                    cached_data = await get_cache(cache_key)
-                    
-                    if cached_data and isinstance(cached_data, list) and len(cached_data) > 0:
-                        # Используем кэш
-                        link_ids = cached_data
+                    # Если передан link_id (миграция), обрабатываем только эту связь
+                    if link_id:
                         result = await session.execute(
                             select(CrosspostingLink)
                             .options(
                                 selectinload(CrosspostingLink.max_channel),
                                 selectinload(CrosspostingLink.telegram_channel)
                             )
-                            .where(CrosspostingLink.id.in_(link_ids))
-                            .where(CrosspostingLink.is_enabled == True)
+                            .where(CrosspostingLink.id == link_id)
                         )
-                        links: List[CrosspostingLink] = result.scalars().all()
+                        link = result.scalar_one_or_none()
+                        if not link:
+                            logger.debug("link_not_found_for_migration", link_id=link_id, telegram_channel_id=telegram_channel_id)
+                            return False
+                        links_to_process = [link]
                     else:
-                        # Поиск активных связей для канала с eager loading
-                        result = await session.execute(
-                            select(CrosspostingLink)
-                            .options(
-                                selectinload(CrosspostingLink.max_channel),
-                                selectinload(CrosspostingLink.telegram_channel)
-                            )
-                            .where(CrosspostingLink.telegram_channel_id == telegram_channel_id)
-                            .where(CrosspostingLink.is_enabled == True)
-                        )
-                        links = result.scalars().all()
+                        # Получаем активные связи с eager loading для оптимизации
+                        cache_key = f"channel_links:{telegram_channel_id}"
+                        cached_data = await get_cache(cache_key)
                         
-                        # Кэширование ID связей
-                        if links:
-                            link_ids = [link.id for link in links]
-                            await set_cache(cache_key, link_ids)
-                    
-                    if not links:
-                        logger.debug("no_active_links", telegram_channel_id=telegram_channel_id)
-                        return False
-                    
-                    # Проверка на дубликат для всех связей одним запросом
-                    link_ids_list = [link.id for link in links]
-                    existing_logs = await session.execute(
-                        select(MessageLog)
-                        .where(
-                            MessageLog.crossposting_link_id.in_(link_ids_list),
-                            MessageLog.telegram_message_id == telegram_message_id
+                        if cached_data and isinstance(cached_data, list) and len(cached_data) > 0:
+                            # Используем кэш
+                            link_ids = cached_data
+                            result = await session.execute(
+                                select(CrosspostingLink)
+                                .options(
+                                    selectinload(CrosspostingLink.max_channel),
+                                    selectinload(CrosspostingLink.telegram_channel)
+                                )
+                                .where(CrosspostingLink.id.in_(link_ids))
+                                .where(CrosspostingLink.is_enabled == True)
+                            )
+                            links: List[CrosspostingLink] = result.scalars().all()
+                        else:
+                            # Поиск активных связей для канала с eager loading
+                            result = await session.execute(
+                                select(CrosspostingLink)
+                                .options(
+                                    selectinload(CrosspostingLink.max_channel),
+                                    selectinload(CrosspostingLink.telegram_channel)
+                                )
+                                .where(CrosspostingLink.telegram_channel_id == telegram_channel_id)
+                                .where(CrosspostingLink.is_enabled == True)
+                            )
+                            links = result.scalars().all()
+                            
+                            # Кэширование ID связей
+                            if links:
+                                link_ids = [link.id for link in links]
+                                await set_cache(cache_key, link_ids)
+                        
+                        if not links:
+                            logger.debug("no_active_links", telegram_channel_id=telegram_channel_id)
+                            return False
+                        
+                        # Проверка на дубликат для всех связей одним запросом
+                        # ВАЖНО: Проверяем только записи со статусом SUCCESS, чтобы не пропускать
+                        # сообщения, которые были обработаны с ошибкой (FAILED) или еще обрабатываются (PENDING)
+                        link_ids_list = [link.id for link in links]
+                        existing_logs = await session.execute(
+                            select(MessageLog)
+                            .where(
+                                MessageLog.crossposting_link_id.in_(link_ids_list),
+                                MessageLog.telegram_message_id == telegram_message_id,
+                                MessageLog.status == MessageStatus.SUCCESS.value
+                            )
                         )
-                    )
-                    existing_link_ids = {log.crossposting_link_id for log in existing_logs.scalars().all()}
-                    
-                    # Обрабатываем только те связи, для которых еще нет лога
-                    links_to_process = [link for link in links if link.id not in existing_link_ids]
-                    
-                    if not links_to_process:
-                        logger.debug("all_messages_duplicate", telegram_channel_id=telegram_channel_id, message_id=telegram_message_id)
-                        return True
+                        existing_link_ids = {log.crossposting_link_id for log in existing_logs.scalars().all()}
+                        
+                        # Обрабатываем только те связи, для которых еще нет успешного лога
+                        links_to_process = [link for link in links if link.id not in existing_link_ids]
+                        
+                        if not links_to_process:
+                            logger.debug("all_messages_duplicate", telegram_channel_id=telegram_channel_id, message_id=telegram_message_id)
+                            return True
                     
                     # Обрабатываем каждую связь
                     success_count = 0
@@ -133,7 +151,7 @@ class MessageProcessor:
                                 crossposting_link_id=link.id,
                                 telegram_message_id=telegram_message_id,
                                 status=MessageStatus.PENDING.value,
-                                message_type=message_data.get("type", MessageType.TEXT.value),
+                                message_type=message_data.get("type", "text"),  # Используем строковое значение напрямую
                                 created_at=datetime.utcnow()
                             )
                             session.add(message_log)
@@ -171,11 +189,16 @@ class MessageProcessor:
                             
                             processing_time = int((datetime.utcnow() - link_start_time).total_seconds() * 1000)
                             
+                            # Безопасное извлечение message_id
+                            max_message_id = None
+                            if max_message and isinstance(max_message, dict):
+                                max_message_id = max_message.get("message_id")
+                            
                             logger.info(
                                 "message_processed",
                                 link_id=link.id,
                                 telegram_message_id=telegram_message_id,
-                                max_message_id=max_message.get("message_id")
+                                max_message_id=max_message_id
                             )
                             
                             return (link.id, max_message, None, processing_time)
@@ -240,9 +263,13 @@ class MessageProcessor:
                         
                         if max_message:
                             message_log = next(ml for l, ml in message_logs if l.id == link_id)
+                            # Безопасное извлечение message_id
+                            max_message_id = ""
+                            if isinstance(max_message, dict):
+                                max_message_id = str(max_message.get("message_id", ""))
                             success_updates.append({
                                 "message_log_id": message_log.id,
-                                "max_message_id": str(max_message.get("message_id", "")),
+                                "max_message_id": max_message_id,
                                 "processing_time": processing_time
                             })
                             success_count += 1
@@ -349,18 +376,18 @@ class MessageProcessor:
         Raises:
             APIError: При ошибке API
         """
-        message_type = message_data.get("type", MessageType.TEXT.value)
+        message_type = message_data.get("type", "text")  # Используем строковое значение напрямую
         max_channel_id = link.max_channel.channel_id
         
         try:
-            if message_type == MessageType.TEXT.value:
+            if message_type == "text":
                 text = message_data.get("text", "")
                 return await self.max_client.send_message(
                     chat_id=max_channel_id,
                     text=text,
                     parse_mode=message_data.get("parse_mode")
                 )
-            elif message_type == MessageType.PHOTO.value:
+            elif message_type == "photo":
                 photo_url = message_data.get("photo_url")
                 if not photo_url:
                     # Если нет URL, отправляем как текст с упоминанием фото
@@ -391,10 +418,17 @@ class MessageProcessor:
                             logger.warning("failed_to_delete_media_after_send", file_path=local_file_path, error=str(delete_error))
                     return result
                 except Exception as e:
-                    # В случае ошибки не удаляем файл сразу, он будет удален при очистке
-                    logger.warning("failed_to_send_photo_keeping_file", error=str(e), photo_url=photo_url)
+                    # Удаляем файл даже при ошибке отправки
+                    if local_file_path:
+                        from app.utils.media_handler import delete_media_file
+                        try:
+                            await delete_media_file(local_file_path)
+                            logger.info("media_file_deleted_after_error", file_path=local_file_path)
+                        except Exception as delete_error:
+                            logger.warning("failed_to_delete_media_after_error", file_path=local_file_path, error=str(delete_error))
+                    logger.warning("failed_to_send_photo", error=str(e), photo_url=photo_url)
                     raise
-            elif message_type == MessageType.VIDEO.value:
+            elif message_type == "video":
                 from app.utils.media_handler import delete_media_file
                 video_url = message_data.get("video_url")
                 local_file_path = message_data.get("local_file_path")
@@ -410,26 +444,33 @@ class MessageProcessor:
                         parse_mode=parse_mode
                     )
                 
-                    try:
-                        result = await self.max_client.send_video(
-                            chat_id=max_channel_id,
-                            video_url=video_url,
-                            caption=caption,
-                            local_file_path=local_file_path,
-                            parse_mode=parse_mode
-                        )
-                        # Удаляем файл после успешной отправки (ДО return)
-                        if local_file_path:
-                            try:
-                                await delete_media_file(local_file_path)
-                                logger.info("video_file_deleted_after_send", file_path=local_file_path)
-                            except Exception as delete_error:
-                                # Логируем ошибку удаления, но не прерываем процесс
-                                logger.warning("failed_to_delete_video_after_send", file_path=local_file_path, error=str(delete_error))
-                        return result
-                    except Exception as e:
-                        logger.warning("failed_to_send_video_keeping_file", error=str(e), video_url=video_url)
-                        raise
+                try:
+                    result = await self.max_client.send_video(
+                        chat_id=max_channel_id,
+                        video_url=video_url,
+                        caption=caption,
+                        local_file_path=local_file_path,
+                        parse_mode=parse_mode
+                    )
+                    # Удаляем файл после успешной отправки (ДО return)
+                    if local_file_path:
+                        try:
+                            await delete_media_file(local_file_path)
+                            logger.info("video_file_deleted_after_send", file_path=local_file_path)
+                        except Exception as delete_error:
+                            # Логируем ошибку удаления, но не прерываем процесс
+                            logger.warning("failed_to_delete_video_after_send", file_path=local_file_path, error=str(delete_error))
+                    return result
+                except Exception as e:
+                    # Удаляем файл даже при ошибке отправки
+                    if local_file_path:
+                        try:
+                            await delete_media_file(local_file_path)
+                            logger.info("video_file_deleted_after_error", file_path=local_file_path)
+                        except Exception as delete_error:
+                            logger.warning("failed_to_delete_video_after_error", file_path=local_file_path, error=str(delete_error))
+                    logger.warning("failed_to_send_video", error=str(e), video_url=video_url)
+                    raise
             else:
                 # Для других типов отправляем как текст с указанием типа
                 text = message_data.get("text", message_data.get("caption", "")) or f"[{message_type}]"
@@ -458,7 +499,6 @@ class MessageProcessor:
         """
         from pyrogram.types import Message
         from app.utils.media_handler import get_media_url, download_and_store_media
-        from app.utils.enums import MessageType
         
         # Пропускаем только полностью пустые сообщения (без текста, caption и медиа)
         if not message.text and not message.caption and not (message.photo or message.video or message.document or message.audio or message.voice or message.sticker):
@@ -469,41 +509,6 @@ class MessageProcessor:
         telegram_chat_id = message.chat.id if message.chat else None
         if not telegram_chat_id:
             return
-        
-        # Проверяем, идет ли миграция для этого канала
-        from app.models.telegram_channel import TelegramChannel
-        async with async_session_maker() as session:
-            result = await session.execute(
-                select(TelegramChannel).where(TelegramChannel.channel_id == telegram_chat_id)
-            )
-            telegram_channel = result.scalar_one_or_none()
-            
-            if telegram_channel:
-                # Получаем все активные связи для канала
-                links_result = await session.execute(
-                    select(CrosspostingLink)
-                    .where(CrosspostingLink.telegram_channel_id == telegram_channel.id)
-                    .where(CrosspostingLink.is_enabled == True)
-                )
-                links = links_result.scalars().all()
-                
-                # Проверяем, идет ли миграция для какой-либо связи
-                for link in links:
-                    if await migration_queue.is_migrating(link.id):
-                        # Добавляем сообщение в очередь
-                        message_data = {
-                            "message_id": message.id,
-                            "text": message.text or "",
-                            "caption": message.caption or "",
-                            "photo": message.photo,
-                            "video": message.video,
-                            "document": message.document,
-                            "media_group_id": getattr(message, 'media_group_id', None),
-                            "date": message.date
-                        }
-                        await migration_queue.add_message(link.id, message_data)
-                        logger.debug("message_added_to_migration_queue", link_id=link.id, message_id=message.id)
-                        return
         
         # Если сообщение входит в медиа-группу, обрабатываем через handler
         if hasattr(message, 'media_group_id') and message.media_group_id is not None:
@@ -519,14 +524,14 @@ class MessageProcessor:
         
         # Подготовка данных сообщения
         message_data = {
-            "type": MessageType.TEXT.value,
+            "type": "text",  # Используем строковое значение напрямую
             "text": message.text or message.caption or "",
         }
         
         # Определение типа сообщения и получение URL медиа
         if message.photo:
             logger.info("processing_photo_message", chat_id=message.chat.id if message.chat else None)
-            message_data["type"] = MessageType.PHOTO.value
+            message_data["type"] = "photo"
             # Обрабатываем форматирование caption, если есть
             if message.caption_entities:
                 from app.utils.text_formatter import apply_formatting
@@ -558,7 +563,7 @@ class MessageProcessor:
                 message_data["photo_url"] = None
         elif message.video:
             logger.info("processing_video_message", chat_id=message.chat.id if message.chat else None)
-            message_data["type"] = MessageType.VIDEO.value
+            message_data["type"] = "video"
             # Обрабатываем форматирование caption, если есть
             if message.caption_entities:
                 from app.utils.text_formatter import apply_formatting
@@ -591,7 +596,7 @@ class MessageProcessor:
                 message_data["video_url"] = None
                 message_data["local_file_path"] = None
         elif message.document:
-            message_data["type"] = MessageType.DOCUMENT.value
+            message_data["type"] = "document"
             message_data["caption"] = message.caption
             if client:
                 try:
@@ -602,7 +607,7 @@ class MessageProcessor:
             else:
                 message_data["document_url"] = None
         elif message.audio:
-            message_data["type"] = MessageType.AUDIO.value
+            message_data["type"] = "audio"
             message_data["caption"] = message.caption
             if client:
                 try:
@@ -613,7 +618,7 @@ class MessageProcessor:
             else:
                 message_data["audio_url"] = None
         elif message.voice:
-            message_data["type"] = MessageType.VOICE.value
+            message_data["type"] = "voice"
             if client:
                 try:
                     message_data["voice_url"] = await get_media_url(client, message)
@@ -623,7 +628,7 @@ class MessageProcessor:
             else:
                 message_data["voice_url"] = None
         elif message.sticker:
-            message_data["type"] = MessageType.STICKER.value
+            message_data["type"] = "sticker"
             if client:
                 try:
                     message_data["sticker_url"] = await get_media_url(client, message)
@@ -770,6 +775,36 @@ class MessageProcessor:
                 except Exception as e:
                     logger.error("failed_to_download_video_from_group", error=str(e))
         
+        # Для миграции создаем записи в MessageLog для всех сообщений из группы
+        if link_id:
+            from app.models.message_log import MessageLog
+            from app.utils.enums import MessageStatus
+            from datetime import datetime
+            
+            async with async_session_maker() as session:
+                for msg in messages:
+                    # Проверяем, есть ли уже запись
+                    result = await session.execute(
+                        select(MessageLog)
+                        .where(MessageLog.telegram_message_id == msg.id)
+                        .where(MessageLog.crossposting_link_id == link_id)
+                    )
+                    message_log = result.scalar_one_or_none()
+                    
+                    if not message_log:
+                        # Определяем тип сообщения
+                        msg_type = "photo" if msg.photo else "video" if msg.video else "text"
+                        # Создаем новую запись
+                        message_log = MessageLog(
+                            crossposting_link_id=link_id,
+                            telegram_message_id=msg.id,
+                            status=MessageStatus.PENDING.value,
+                            message_type=msg_type,
+                            created_at=datetime.utcnow()
+                        )
+                        session.add(message_log)
+                await session.commit()
+        
         # Определяем тип группы и обрабатываем соответственно
         if photos_data and not videos_data:
             # Только фото - отправляем как альбом фото
@@ -782,7 +817,7 @@ class MessageProcessor:
         elif photos_data and videos_data:
             # Смешанная группа - отправляем все медиа одним сообщением
             logger.info("mixed_media_group", photos_count=len(photos_data), videos_count=len(videos_data))
-            await self._send_mixed_media_group(telegram_channel_id, photos_data, videos_data, caption, caption_parse_mode, client, link_id=link_id)
+            await self._send_mixed_media_group(telegram_channel_id, photos_data, videos_data, caption, caption_parse_mode, client, link_id=link_id, messages=messages if link_id else None)
             return
         else:
             logger.warning("no_media_in_media_group")
@@ -796,7 +831,7 @@ class MessageProcessor:
         )
         
         # Отправляем группу медиа
-        await self._send_media_group(telegram_channel_id, media_data, media_type, caption, caption_parse_mode, client, link_id=link_id)
+        await self._send_media_group(telegram_channel_id, media_data, media_type, caption, caption_parse_mode, client, link_id=link_id, messages=messages if link_id else None)
     
     async def _send_media_group(
         self,
@@ -805,7 +840,9 @@ class MessageProcessor:
         media_type: str,
         caption: Optional[str],
         caption_parse_mode: Optional[str],
-        client
+        client,
+        link_id: Optional[int] = None,
+        messages: Optional[List] = None
     ):
         """
         Отправить группу медиа (фото или видео) в MAX.
@@ -817,22 +854,34 @@ class MessageProcessor:
             caption: Подпись к группе
             caption_parse_mode: Режим форматирования подписи
             client: Pyrogram клиент
+            link_id: ID связи для миграции (опционально, если указан - используется только эта связь)
         """
         from app.utils.media_handler import delete_media_file
         
         try:
             # Получаем связи для кросспостинга
             async with async_session_maker() as session:
-                result = await session.execute(
-                    select(CrosspostingLink)
-                    .where(CrosspostingLink.telegram_channel_id == telegram_channel_id)
-                    .where(CrosspostingLink.is_enabled == True)
-                    .options(selectinload(CrosspostingLink.max_channel))
-                )
-                links = result.scalars().all()
+                if link_id:
+                    # Для миграции используем только указанную связь
+                    result = await session.execute(
+                        select(CrosspostingLink)
+                        .where(CrosspostingLink.id == link_id)
+                        .where(CrosspostingLink.telegram_channel_id == telegram_channel_id)
+                        .options(selectinload(CrosspostingLink.max_channel))
+                    )
+                    links = result.scalars().all()
+                else:
+                    # Для обычного кросспостинга используем все активные связи
+                    result = await session.execute(
+                        select(CrosspostingLink)
+                        .where(CrosspostingLink.telegram_channel_id == telegram_channel_id)
+                        .where(CrosspostingLink.is_enabled == True)
+                        .options(selectinload(CrosspostingLink.max_channel))
+                    )
+                    links = result.scalars().all()
             
             if not links:
-                logger.debug("no_active_links_for_media_group", channel_id=telegram_channel_id)
+                logger.debug("no_active_links_for_media_group", channel_id=telegram_channel_id, link_id=link_id)
                 return
             
             # Отправляем в каждый MAX канал
@@ -874,6 +923,32 @@ class MessageProcessor:
                             videos_count=len(local_paths)
                         )
                     
+                    # Обновляем MessageLog для миграции
+                    if link_id and result and messages:
+                        from app.models.message_log import MessageLog
+                        from app.utils.enums import MessageStatus
+                        from datetime import datetime
+                        
+                        # Извлекаем message_id из результата
+                        max_message_id = None
+                        if isinstance(result, dict):
+                            max_message_id = result.get("message_id")
+                        
+                        # Обновляем все записи для сообщений из группы
+                        async with async_session_maker() as session:
+                            for msg in messages:
+                                await session.execute(
+                                    update(MessageLog)
+                                    .where(MessageLog.telegram_message_id == msg.id)
+                                    .where(MessageLog.crossposting_link_id == link_id)
+                                    .values(
+                                        max_message_id=str(max_message_id) if max_message_id else None,
+                                        status=MessageStatus.SUCCESS.value,
+                                        sent_at=datetime.utcnow()
+                                    )
+                                )
+                            await session.commit()
+                    
                     # Удаляем файлы после успешной отправки (ДО выхода из try блока)
                     for media_item in media_data:
                         if media_item.get("local_file_path"):
@@ -884,6 +959,14 @@ class MessageProcessor:
                                 logger.warning("failed_to_delete_media_in_group", file_path=media_item["local_file_path"], error=str(delete_error))
                     
                 except Exception as e:
+                    # Удаляем файлы даже при ошибке отправки
+                    for media_item in media_data:
+                        if media_item.get("local_file_path"):
+                            try:
+                                await delete_media_file(media_item["local_file_path"])
+                                logger.info("media_file_deleted_after_error", file_path=media_item["local_file_path"])
+                            except Exception as delete_error:
+                                logger.warning("failed_to_delete_media_after_error", file_path=media_item["local_file_path"], error=str(delete_error))
                     logger.error(
                         "failed_to_send_media_group",
                         max_channel_id=link.max_channel.channel_id,
@@ -901,7 +984,9 @@ class MessageProcessor:
         videos_data: List[Dict[str, str]],
         caption: Optional[str],
         caption_parse_mode: Optional[str],
-        client
+        client,
+        link_id: Optional[int] = None,
+        messages: Optional[List] = None
     ):
         """
         Отправить смешанную группу медиа (фото + видео) одним сообщением в MAX.
@@ -915,22 +1000,34 @@ class MessageProcessor:
             caption: Подпись к группе
             caption_parse_mode: Режим форматирования подписи
             client: Pyrogram клиент
+            link_id: ID связи для миграции (опционально, если указан - используется только эта связь)
         """
         from app.utils.media_handler import delete_media_file
         
         try:
             # Получаем связи для кросспостинга
             async with async_session_maker() as session:
-                result = await session.execute(
-                    select(CrosspostingLink)
-                    .where(CrosspostingLink.telegram_channel_id == telegram_channel_id)
-                    .where(CrosspostingLink.is_enabled == True)
-                    .options(selectinload(CrosspostingLink.max_channel))
-                )
-                links = result.scalars().all()
+                if link_id:
+                    # Для миграции используем только указанную связь
+                    result = await session.execute(
+                        select(CrosspostingLink)
+                        .where(CrosspostingLink.id == link_id)
+                        .where(CrosspostingLink.telegram_channel_id == telegram_channel_id)
+                        .options(selectinload(CrosspostingLink.max_channel))
+                    )
+                    links = result.scalars().all()
+                else:
+                    # Для обычного кросспостинга используем все активные связи
+                    result = await session.execute(
+                        select(CrosspostingLink)
+                        .where(CrosspostingLink.telegram_channel_id == telegram_channel_id)
+                        .where(CrosspostingLink.is_enabled == True)
+                        .options(selectinload(CrosspostingLink.max_channel))
+                    )
+                    links = result.scalars().all()
             
             if not links:
-                logger.debug("no_active_links_for_mixed_media_group", channel_id=telegram_channel_id)
+                logger.debug("no_active_links_for_mixed_media_group", channel_id=telegram_channel_id, link_id=link_id)
                 return
             
             # Отправляем в каждый MAX канал
@@ -1083,6 +1180,21 @@ class MessageProcessor:
                                 logger.warning("failed_to_delete_video_in_mixed_group", file_path=video_data["local_file_path"], error=str(delete_error))
                     
                 except Exception as e:
+                    # Удаляем файлы даже при ошибке отправки
+                    for photo_data in photos_data:
+                        if photo_data.get("local_file_path"):
+                            try:
+                                await delete_media_file(photo_data["local_file_path"])
+                                logger.info("photo_file_deleted_after_error", file_path=photo_data["local_file_path"])
+                            except Exception as delete_error:
+                                logger.warning("failed_to_delete_photo_after_error", file_path=photo_data["local_file_path"], error=str(delete_error))
+                    for video_data in videos_data:
+                        if video_data.get("local_file_path"):
+                            try:
+                                await delete_media_file(video_data["local_file_path"])
+                                logger.info("video_file_deleted_after_error", file_path=video_data["local_file_path"])
+                            except Exception as delete_error:
+                                logger.warning("failed_to_delete_video_after_error", file_path=video_data["local_file_path"], error=str(delete_error))
                     logger.error(
                         "failed_to_send_mixed_media_group",
                         max_channel_id=link.max_channel.channel_id,
