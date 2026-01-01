@@ -775,35 +775,67 @@ class MessageProcessor:
                 except Exception as e:
                     logger.error("failed_to_download_video_from_group", error=str(e))
         
-        # Для миграции создаем записи в MessageLog для всех сообщений из группы
-        if link_id:
-            from app.models.message_log import MessageLog
-            from app.utils.enums import MessageStatus
-            from datetime import datetime
+        # КРИТИЧНО: Создаем записи в MessageLog для всех сообщений из группы
+        # Это нужно как для миграции (link_id указан), так и для кросспостинга (link_id не указан)
+        from app.models.message_log import MessageLog
+        from app.utils.enums import MessageStatus
+        from datetime import datetime
+        from app.models.crossposting_link import CrosspostingLink
+        
+        async with async_session_maker() as session:
+            # Определяем, для каких связей нужно создать записи
+            if link_id:
+                # Для миграции используем только указанную связь
+                links_to_log = [link_id]
+            else:
+                # Для кросспостинга используем все активные связи
+                result = await session.execute(
+                    select(CrosspostingLink.id)
+                    .where(CrosspostingLink.telegram_channel_id == telegram_channel_id)
+                    .where(CrosspostingLink.is_enabled == True)
+                )
+                # result.scalars().all() уже возвращает список ID (int), не нужно обращаться к .id
+                links_to_log = list(result.scalars().all())
             
-            async with async_session_maker() as session:
-                for msg in messages:
-                    # Проверяем, есть ли уже запись
-                    result = await session.execute(
+            # Создаем записи в MessageLog для всех сообщений и всех связей
+            for msg in messages:
+                # Определяем тип сообщения
+                msg_type = "photo" if msg.photo else "video" if msg.video else "text"
+                
+                for link_id_for_log in links_to_log:
+                    # Проверяем, есть ли уже запись со статусом SUCCESS (дубликат)
+                    existing_log = await session.execute(
                         select(MessageLog)
                         .where(MessageLog.telegram_message_id == msg.id)
-                        .where(MessageLog.crossposting_link_id == link_id)
+                        .where(MessageLog.crossposting_link_id == link_id_for_log)
+                        .where(MessageLog.status == MessageStatus.SUCCESS.value)
                     )
-                    message_log = result.scalar_one_or_none()
+                    if existing_log.scalar_one_or_none():
+                        # Уже есть успешная запись - пропускаем
+                        continue
+                    
+                    # Проверяем, есть ли запись со статусом PENDING или FAILED
+                    existing_pending = await session.execute(
+                        select(MessageLog)
+                        .where(MessageLog.telegram_message_id == msg.id)
+                        .where(MessageLog.crossposting_link_id == link_id_for_log)
+                    )
+                    message_log = existing_pending.scalar_one_or_none()
                     
                     if not message_log:
-                        # Определяем тип сообщения
-                        msg_type = "photo" if msg.photo else "video" if msg.video else "text"
                         # Создаем новую запись
                         message_log = MessageLog(
-                            crossposting_link_id=link_id,
+                            crossposting_link_id=link_id_for_log,
                             telegram_message_id=msg.id,
                             status=MessageStatus.PENDING.value,
                             message_type=msg_type,
                             created_at=datetime.utcnow()
                         )
                         session.add(message_log)
-                await session.commit()
+                    else:
+                        # Обновляем существующую запись на PENDING
+                        message_log.status = MessageStatus.PENDING.value
+            await session.commit()
         
         # Определяем тип группы и обрабатываем соответственно
         if photos_data and not videos_data:
@@ -817,7 +849,8 @@ class MessageProcessor:
         elif photos_data and videos_data:
             # Смешанная группа - отправляем все медиа одним сообщением
             logger.info("mixed_media_group", photos_count=len(photos_data), videos_count=len(videos_data))
-            await self._send_mixed_media_group(telegram_channel_id, photos_data, videos_data, caption, caption_parse_mode, client, link_id=link_id, messages=messages if link_id else None)
+            # КРИТИЧНО: Передаем messages всегда, чтобы можно было обновить MessageLog
+            await self._send_mixed_media_group(telegram_channel_id, photos_data, videos_data, caption, caption_parse_mode, client, link_id=link_id, messages=messages)
             return
         else:
             logger.warning("no_media_in_media_group")
@@ -831,7 +864,8 @@ class MessageProcessor:
         )
         
         # Отправляем группу медиа
-        await self._send_media_group(telegram_channel_id, media_data, media_type, caption, caption_parse_mode, client, link_id=link_id, messages=messages if link_id else None)
+        # КРИТИЧНО: Передаем messages всегда, чтобы можно было обновить MessageLog
+        await self._send_media_group(telegram_channel_id, media_data, media_type, caption, caption_parse_mode, client, link_id=link_id, messages=messages)
     
     async def _send_media_group(
         self,
@@ -923,11 +957,13 @@ class MessageProcessor:
                             videos_count=len(local_paths)
                         )
                     
-                    # Обновляем MessageLog для миграции
-                    if link_id and result and messages:
+                    # КРИТИЧНО: Обновляем MessageLog для всех сообщений из группы
+                    # Это нужно как для миграции (link_id указан), так и для кросспостинга (link_id не указан)
+                    if result and messages:
                         from app.models.message_log import MessageLog
                         from app.utils.enums import MessageStatus
                         from datetime import datetime
+                        from sqlalchemy import update
                         
                         # Извлекаем message_id из результата
                         max_message_id = None
@@ -935,19 +971,33 @@ class MessageProcessor:
                             max_message_id = result.get("message_id")
                         
                         # Обновляем все записи для сообщений из группы
-                        async with async_session_maker() as session:
+                        async with async_session_maker() as session_for_update:
                             for msg in messages:
-                                await session.execute(
-                                    update(MessageLog)
-                                    .where(MessageLog.telegram_message_id == msg.id)
-                                    .where(MessageLog.crossposting_link_id == link_id)
-                                    .values(
-                                        max_message_id=str(max_message_id) if max_message_id else None,
-                                        status=MessageStatus.SUCCESS.value,
-                                        sent_at=datetime.utcnow()
+                                if link_id:
+                                    # Для миграции обновляем только указанную связь
+                                    await session_for_update.execute(
+                                        update(MessageLog)
+                                        .where(MessageLog.telegram_message_id == msg.id)
+                                        .where(MessageLog.crossposting_link_id == link_id)
+                                        .values(
+                                            max_message_id=str(max_message_id) if max_message_id else None,
+                                            status=MessageStatus.SUCCESS.value,
+                                            sent_at=datetime.utcnow()
+                                        )
                                     )
-                                )
-                            await session.commit()
+                                else:
+                                    # Для кросспостинга обновляем все активные связи для этого сообщения
+                                    await session_for_update.execute(
+                                        update(MessageLog)
+                                        .where(MessageLog.telegram_message_id == msg.id)
+                                        .where(MessageLog.crossposting_link_id == link.id)
+                                        .values(
+                                            max_message_id=str(max_message_id) if max_message_id else None,
+                                            status=MessageStatus.SUCCESS.value,
+                                            sent_at=datetime.utcnow()
+                                        )
+                                    )
+                            await session_for_update.commit()
                     
                     # Удаляем файлы после успешной отправки (ДО выхода из try блока)
                     for media_item in media_data:
@@ -1112,6 +1162,7 @@ class MessageProcessor:
                     
                     max_retries = 5
                     retry_delay = 3
+                    result = None
                     
                     for attempt in range(max_retries):
                         try:
@@ -1162,6 +1213,48 @@ class MessageProcessor:
                             logger.warning(f"mixed_group_retry_after_error", attempt=attempt+1, error=str(e))
                             await asyncio.sleep(retry_delay)
                             retry_delay *= 2
+                    
+                    # КРИТИЧНО: Обновляем MessageLog для всех сообщений из группы
+                    # Это нужно как для миграции (link_id указан), так и для кросспостинга (link_id не указан)
+                    if result and messages:
+                        from app.models.message_log import MessageLog
+                        from app.utils.enums import MessageStatus
+                        from datetime import datetime
+                        from sqlalchemy import update
+                        
+                        # Извлекаем message_id из результата
+                        max_message_id = None
+                        if isinstance(result, dict):
+                            max_message_id = result.get("message_id")
+                        
+                        # Обновляем все записи для сообщений из группы
+                        async with async_session_maker() as session_for_update:
+                            for msg in messages:
+                                if link_id:
+                                    # Для миграции обновляем только указанную связь
+                                    await session_for_update.execute(
+                                        update(MessageLog)
+                                        .where(MessageLog.telegram_message_id == msg.id)
+                                        .where(MessageLog.crossposting_link_id == link_id)
+                                        .values(
+                                            max_message_id=str(max_message_id) if max_message_id else None,
+                                            status=MessageStatus.SUCCESS.value,
+                                            sent_at=datetime.utcnow()
+                                        )
+                                    )
+                                else:
+                                    # Для кросспостинга обновляем все активные связи для этого сообщения
+                                    await session_for_update.execute(
+                                        update(MessageLog)
+                                        .where(MessageLog.telegram_message_id == msg.id)
+                                        .where(MessageLog.crossposting_link_id == link.id)
+                                        .values(
+                                            max_message_id=str(max_message_id) if max_message_id else None,
+                                            status=MessageStatus.SUCCESS.value,
+                                            sent_at=datetime.utcnow()
+                                        )
+                                    )
+                                    await session_for_update.commit()
                     
                     # Удаляем файлы после успешной отправки (ДО выхода из try блока)
                     for photo_data in photos_data:
