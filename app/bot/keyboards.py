@@ -17,8 +17,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="📋 Список связей")
             ],
             [
-                KeyboardButton(text="📊 Статус"),
-                KeyboardButton(text="📥 Перенести старые посты")
+                KeyboardButton(text="📊 Статус")
             ],
             [
                 KeyboardButton(text="❓ Помощь")
@@ -55,8 +54,11 @@ def get_channels_list_keyboard(links: List[dict], page: int = 0, per_page: int =
         is_enabled = link.get("is_enabled", False)
         
         status_icon = "✅" if is_enabled else "❌"
-        # Для обычных кнопок используем короткий текст с ID
-        button_text = f"{status_icon} Связь #{link_id}"
+        # Формат: "✅ Telegram канал - MAX канал" или "❌ Telegram канал - MAX канал"
+        # Ограничиваем длину названий, чтобы кнопка не была слишком длинной
+        telegram_short = telegram_title[:20] + "..." if len(telegram_title) > 20 else telegram_title
+        max_short = max_title[:20] + "..." if len(max_title) > 20 else max_title
+        button_text = f"{status_icon} {telegram_short} - {max_short}"
         
         keyboard_buttons.append([
             KeyboardButton(text=button_text)
@@ -102,10 +104,6 @@ def get_link_detail_keyboard(link_id: int, is_enabled: bool) -> ReplyKeyboardMar
         keyboard_buttons.append([
             KeyboardButton(text="▶️ Включить")
         ])
-    
-    keyboard_buttons.append([
-        KeyboardButton(text="📊 Детальный статус")
-    ])
     
     keyboard_buttons.append([
         KeyboardButton(text="🗑 Удалить")

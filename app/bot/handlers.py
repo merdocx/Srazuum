@@ -799,14 +799,14 @@ async def process_max_channel(message: Message, state: FSMContext):
 @router.message(Command("list_channels"))
 async def cmd_list_channels(message: Message):
     """Обработчик команды /list_channels."""
-    await show_channels_list(message)
+    await show_channels_list(message, state)
 
 
 @router.message(F.text == "📋 Список связей")
 async def message_list_channels(message: Message, state: FSMContext):
     """Обработчик кнопки списка связей."""
     await state.update_data(channels_list_page=0)
-    await show_channels_list(message)
+    await show_channels_list(message, state)
 
 
 async def show_channels_list(message: Message, state: FSMContext = None, page: int = 0):
@@ -835,19 +835,41 @@ async def show_channels_list(message: Message, state: FSMContext = None, page: i
         
         # Подготовка данных для клавиатуры
         links_data = []
+        button_to_link_id = {}  # Маппинг текста кнопки -> link_id
         for link in links:
+            telegram_title = link.telegram_channel.channel_title
+            max_title = link.max_channel.channel_title
+            status_icon = "✅" if link.is_enabled else "❌"
+            # Формируем текст кнопки так же, как в keyboards.py
+            telegram_short = telegram_title[:20] + "..." if len(telegram_title) > 20 else telegram_title
+            max_short = max_title[:20] + "..." if len(max_title) > 20 else max_title
+            button_text = f"{status_icon} {telegram_short} - {max_short}"
+            
             links_data.append({
                 "id": link.id,
-                "telegram_title": link.telegram_channel.channel_title,
-                "max_title": link.max_channel.channel_title,
+                "telegram_title": telegram_title,
+                "max_title": max_title,
                 "is_enabled": link.is_enabled
             })
+            button_to_link_id[button_text] = link.id
         
         text = "📋 Ваши связи каналов:\n\nВыберите связь для управления:"
         keyboard = get_channels_list_keyboard(links_data, page=page)
         
         if state:
-            await state.update_data(channels_list_page=page, links_data=links_data)
+            await state.update_data(
+                channels_list_page=page, 
+                links_data=links_data,
+                button_to_link_id=button_to_link_id
+            )
+            logger.info(
+                "channels_list_shown",
+                user_id=message.from_user.id,
+                page=page,
+                total_links=len(links),
+                mapping_size=len(button_to_link_id),
+                sample_keys=list(button_to_link_id.keys())[:3] if button_to_link_id else []
+            )
         
         await message.answer(text, reply_markup=keyboard)
 
@@ -871,6 +893,110 @@ async def message_list_channels_nav(message: Message, state: FSMContext):
     
     await state.update_data(channels_list_page=new_page)
     await show_channels_list(message, state, page=new_page)
+
+
+async def show_link_detail(message: Message, state: FSMContext, link_id: int):
+    """Показать детали связи."""
+    user = await get_or_create_user(message.from_user.id, message.from_user.username)
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(CrosspostingLink)
+            .options(
+                selectinload(CrosspostingLink.telegram_channel),
+                selectinload(CrosspostingLink.max_channel)
+            )
+            .where(CrosspostingLink.id == link_id)
+            .where(CrosspostingLink.user_id == user.id)
+        )
+        link = result.scalar_one_or_none()
+        
+        if not link:
+            await message.answer("Связь не найдена.")
+            return
+        
+        # Статистика по связи
+        success_count = await session.execute(
+            select(func.count(MessageLog.id))
+            .where(MessageLog.crossposting_link_id == link.id)
+            .where(MessageLog.status == MessageStatus.SUCCESS.value)
+        )
+        failed_count = await session.execute(
+            select(func.count(MessageLog.id))
+            .where(MessageLog.crossposting_link_id == link.id)
+            .where(MessageLog.status == MessageStatus.FAILED.value)
+        )
+        
+        # Последняя успешная отправка
+        last_success = await session.execute(
+            select(MessageLog)
+            .where(MessageLog.crossposting_link_id == link.id)
+            .where(MessageLog.status == MessageStatus.SUCCESS.value)
+            .order_by(MessageLog.sent_at.desc())
+            .limit(1)
+        )
+        last_success_msg = last_success.scalar_one_or_none()
+        
+        status_icon = "✅" if link.is_enabled else "❌"
+        text = (
+            f"{status_icon} Связь #{link.id}\n\n"
+            f"Telegram: {link.telegram_channel.channel_title}\n"
+            f"MAX: {link.max_channel.channel_title}\n"
+            f"Статус: {'Активна' if link.is_enabled else 'Неактивна'}\n"
+            f"Создана: {link.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
+            f"📊 Статистика:\n"
+            f"Успешных: {success_count.scalar() or 0}\n"
+            f"Неудачных: {failed_count.scalar() or 0}"
+        )
+        
+        if last_success_msg:
+            text += f"\n\nПоследняя отправка: {last_success_msg.sent_at.strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        keyboard = get_link_detail_keyboard(link_id, link.is_enabled)
+        await state.set_state(LinkManagementStates.viewing_link_detail)
+        await state.update_data(current_link_id=link_id)
+        await message.answer(text, reply_markup=keyboard)
+        logger.info("link_detail_shown", link_id=link_id, user_id=user.id)
+
+
+@router.message(F.text.startswith("✅") | F.text.startswith("❌"))
+async def message_link_selected(message: Message, state: FSMContext):
+    """Обработчик выбора связи из списка."""
+    # Проверяем, что текст содержит " - " (формат кнопки связи)
+    if not message.text or " - " not in message.text:
+        return
+    
+    data = await state.get_data()
+    button_to_link_id = data.get("button_to_link_id", {})
+    
+    logger.info(
+        "link_selection_attempt",
+        user_id=message.from_user.id,
+        message_text=message.text,
+        has_mapping=bool(button_to_link_id),
+        mapping_keys=list(button_to_link_id.keys())[:3] if button_to_link_id else []
+    )
+    
+    if not button_to_link_id:
+        # Если маппинг не найден, возможно пользователь не в списке связей
+        logger.warning("link_selection_no_mapping", user_id=message.from_user.id, message_text=message.text)
+        return
+    
+    # Ищем link_id по тексту кнопки
+    link_id = button_to_link_id.get(message.text)
+    
+    if not link_id:
+        # Текст не соответствует ни одной кнопке из списка
+        logger.warning(
+            "link_selection_not_found",
+            user_id=message.from_user.id,
+            message_text=message.text,
+            available_keys=list(button_to_link_id.keys())[:5]
+        )
+        return
+    
+    logger.info("link_selected", user_id=message.from_user.id, link_id=link_id, message_text=message.text)
+    await show_link_detail(message, state, link_id)
 
 
 @router.message(Command("status"))
@@ -1379,86 +1505,13 @@ async def message_delete_yes(message: Message, state: FSMContext):
         logger.info("link_deleted", link_id=link_id, user_id=user.id)
 
 
-@router.message(LinkManagementStates.viewing_link_detail, F.text == "📊 Детальный статус")
-async def message_status_detail(message: Message, state: FSMContext):
-    """Обработчик кнопки детального статуса связи."""
+@router.message(LinkManagementStates.viewing_link_detail, F.text == "🔙 Назад к списку")
+async def message_back_to_list(message: Message, state: FSMContext):
+    """Обработчик кнопки 'Назад к списку'."""
     data = await state.get_data()
-    link_id = data.get("current_link_id")
-    
-    if not link_id:
-        await message.answer("Ошибка: не найдена текущая связь.")
-        return
-    
-    user = await get_or_create_user(message.from_user.id, message.from_user.username)
-    
-    # Используем существующую функцию cmd_status_detail
-    async with async_session_maker() as session:
-        result = await session.execute(
-            select(CrosspostingLink)
-            .options(
-                selectinload(CrosspostingLink.telegram_channel),
-                selectinload(CrosspostingLink.max_channel)
-            )
-            .where(CrosspostingLink.id == link_id)
-            .where(CrosspostingLink.user_id == user.id)
-        )
-        link = result.scalar_one_or_none()
-        
-        if not link:
-            await message.answer("Связь не найдена.")
-            return
-        
-        # Статистика по связи
-        success_count = await session.execute(
-            select(func.count(MessageLog.id))
-            .where(MessageLog.crossposting_link_id == link.id)
-            .where(MessageLog.status == MessageStatus.SUCCESS.value)
-        )
-        failed_count = await session.execute(
-            select(func.count(MessageLog.id))
-            .where(MessageLog.crossposting_link_id == link.id)
-            .where(MessageLog.status == MessageStatus.FAILED.value)
-        )
-        
-        # Последняя успешная отправка
-        last_success = await session.execute(
-            select(MessageLog)
-            .where(MessageLog.crossposting_link_id == link.id)
-            .where(MessageLog.status == MessageStatus.SUCCESS.value)
-            .order_by(MessageLog.sent_at.desc())
-            .limit(1)
-        )
-        last_success_msg = last_success.scalar_one_or_none()
-        
-        # Последняя ошибка
-        last_error = await session.execute(
-            select(MessageLog)
-            .where(MessageLog.crossposting_link_id == link.id)
-            .where(MessageLog.status == MessageStatus.FAILED.value)
-            .order_by(MessageLog.created_at.desc())
-            .limit(1)
-        )
-        last_error_msg = last_error.scalar_one_or_none()
-        
-        status_icon = "✅" if link.is_enabled else "❌"
-        text = (
-            f"{status_icon} Детальный статус связи #{link.id}\n\n"
-            f"Telegram: {link.telegram_channel.channel_title}\n"
-            f"MAX: {link.max_channel.channel_title}\n"
-            f"Статус: {'Активна' if link.is_enabled else 'Неактивна'}\n\n"
-            f"📊 Статистика:\n"
-            f"Успешных: {success_count.scalar() or 0}\n"
-            f"Неудачных: {failed_count.scalar() or 0}\n\n"
-        )
-        
-        if last_success_msg:
-            text += f"Последняя отправка: {last_success_msg.sent_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        
-        if last_error_msg:
-            text += f"\nПоследняя ошибка:\n{last_error_msg.error_message[:200]}\n"
-        
-        keyboard = get_link_detail_keyboard(link_id, link.is_enabled)
-        await message.answer(text, reply_markup=keyboard)
+    current_page = data.get("channels_list_page", 0)
+    await show_channels_list(message, state, page=current_page)
+    logger.info("back_to_list", user_id=message.from_user.id)
 
 
 @router.callback_query(F.data.startswith("migrate_link_"))
