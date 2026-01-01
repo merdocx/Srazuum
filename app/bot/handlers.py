@@ -1,6 +1,8 @@
 """Обработчики команд Telegram бота."""
+import asyncio
+import re
 from aiogram import Router, F, Bot
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
@@ -27,7 +29,9 @@ from app.bot.keyboards import (
     get_delete_confirm_keyboard,
     get_back_to_menu_keyboard,
     get_retry_keyboard,
-    get_migrate_links_keyboard
+    get_migrate_links_keyboard,
+    get_migration_offer_keyboard,
+    get_cancel_keyboard
 )
 from config.database import async_session_maker
 from config.settings import settings
@@ -179,6 +183,19 @@ async def message_main_menu(message: Message, state: FSMContext):
     logger.info("main_menu_opened", user_id=message.from_user.id)
 
 
+@router.message(AddChannelStates.waiting_telegram_channel, F.text == "❌ Отмена")
+@router.message(AddChannelStates.waiting_max_channel, F.text == "❌ Отмена")
+async def message_cancel_add_channel(message: Message, state: FSMContext):
+    """Обработчик кнопки 'Отмена' - отменяет процесс создания связи."""
+    await state.clear()
+    text = (
+        "❌ Создание связи отменено.\n\n"
+        "Выберите действие:"
+    )
+    await message.answer(text, reply_markup=get_main_keyboard())
+    logger.info("add_channel_cancelled", user_id=message.from_user.id)
+
+
 @router.message(F.text == "🔄 Повторить")
 async def message_retry(message: Message, state: FSMContext):
     """Обработчик кнопки повтора."""
@@ -194,20 +211,13 @@ async def message_retry(message: Message, state: FSMContext):
             "2. ✅ Вы зашли в [бот в MAX](https://max.ru/id9725096017_bot) и нажали /start\n"
             "3. ✅ [Бот в MAX](https://max.ru/id9725096017_bot) добавлен в ваш MAX-канал в качестве администратора (сначала его необходимо добавить в подписчики канала, затем назначить администратором)\n\n"
             "📝 Для создания связи:\n\n"
-            "Шаг 1: Отправьте данные Telegram-канала одним из способов:\n"
-            "• Перешлите любое сообщение из канала, или\n"
-            "• Отправьте @username канала, или\n"
-            "• Отправьте ссылку: https://t.me/username\n\n"
-            "Шаг 2: Отправьте данные MAX-канала одним из способов:\n"
-            "• Отправьте ID канала (число), или\n"
-            "• Отправьте username канала, или\n"
-            "• Отправьте cсылку на канал"
+            "Шаг 1: Отправьте ссылку на Telegram-канал (пример: https://t.me/username)"
         )
-        await message.answer(text, reply_markup=get_back_to_menu_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        await message.answer(text, reply_markup=get_cancel_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
     elif retry_state == "max_channel":
         await state.set_state(AddChannelStates.waiting_max_channel)
-        text = "Отправьте ID или username вашего MAX-канала."
-        await message.answer(text, reply_markup=get_back_to_menu_keyboard())
+        text = "Отправьте ссылку на MAX-канал (пример: https://max.ru/username)"
+        await message.answer(text, reply_markup=get_cancel_keyboard())
     else:
         await state.set_state(AddChannelStates.waiting_telegram_channel)
         text = (
@@ -217,16 +227,9 @@ async def message_retry(message: Message, state: FSMContext):
             "2. ✅ Вы зашли в [бот в MAX](https://max.ru/id9725096017_bot) и нажали /start\n"
             "3. ✅ [Бот в MAX](https://max.ru/id9725096017_bot) добавлен в ваш MAX-канал в качестве администратора (сначала его необходимо добавить в подписчики канала, затем назначить администратором)\n\n"
             "📝 Для создания связи:\n\n"
-            "Шаг 1: Отправьте данные Telegram-канала одним из способов:\n"
-            "• Перешлите любое сообщение из канала, или\n"
-            "• Отправьте @username канала, или\n"
-            "• Отправьте ссылку: https://t.me/username\n\n"
-            "Шаг 2: Отправьте данные MAX-канала одним из способов:\n"
-            "• Отправьте ID канала (число), или\n"
-            "• Отправьте username канала, или\n"
-            "• Отправьте cсылку на канал"
+            "Шаг 1: Отправьте ссылку на Telegram-канал (пример: https://t.me/username)"
         )
-        await message.answer(text, reply_markup=get_back_to_menu_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        await message.answer(text, reply_markup=get_cancel_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
     
     logger.info("retry_action", state=retry_state, user_id=message.from_user.id)
 
@@ -241,16 +244,9 @@ async def cmd_add_channel(message: Message, state: FSMContext):
         "2. ✅ Вы зашли в [бот в MAX](https://max.ru/id9725096017_bot) и нажали /start\n"
         "3. ✅ [Бот в MAX](https://max.ru/id9725096017_bot) добавлен в ваш MAX-канал в качестве администратора (сначала его необходимо добавить в подписчики канала, затем назначить администратором)\n\n"
         "📝 Для создания связи:\n\n"
-        "Шаг 1: Отправьте данные Telegram-канала одним из способов:\n"
-        "• Перешлите любое сообщение из канала, или\n"
-        "• Отправьте @username канала, или\n"
-        "• Отправьте ссылку: https://t.me/username\n\n"
-        "Шаг 2: Отправьте данные MAX-канала одним из способов:\n"
-        "• Отправьте ID канала (число), или\n"
-        "• Отправьте username канала, или\n"
-        "• Отправьте cсылку на канал"
+        "Шаг 1: Отправьте ссылку на Telegram-канал (пример: https://t.me/username)"
     )
-    await message.answer(text, reply_markup=get_back_to_menu_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+    await message.answer(text, reply_markup=get_cancel_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
     await state.set_state(AddChannelStates.waiting_telegram_channel)
     logger.info("add_channel_started", user_id=message.from_user.id)
 
@@ -265,16 +261,9 @@ async def message_add_channel(message: Message, state: FSMContext):
         "2. ✅ Вы зашли в [бот в MAX](https://max.ru/id9725096017_bot) и нажали /start\n"
         "3. ✅ [Бот в MAX](https://max.ru/id9725096017_bot) добавлен в ваш MAX-канал в качестве администратора (сначала его необходимо добавить в подписчики канала, затем назначить администратором)\n\n"
         "📝 Для создания связи:\n\n"
-        "Шаг 1: Отправьте данные Telegram-канала одним из способов:\n"
-        "• Перешлите любое сообщение из канала, или\n"
-        "• Отправьте @username канала, или\n"
-        "• Отправьте ссылку: https://t.me/username\n\n"
-        "Шаг 2: Отправьте данные MAX-канала одним из способов:\n"
-        "• Отправьте ID канала (число), или\n"
-        "• Отправьте username канала, или\n"
-        "• Отправьте cсылку на канал"
+        "Шаг 1: Отправьте ссылку на Telegram-канал (пример: https://t.me/username)"
     )
-    await message.answer(text, reply_markup=get_back_to_menu_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+    await message.answer(text, reply_markup=get_cancel_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
     await state.set_state(AddChannelStates.waiting_telegram_channel)
     logger.info("add_channel_started", user_id=message.from_user.id)
 
@@ -420,8 +409,9 @@ async def process_telegram_channel(message: Message, state: FSMContext):
         
         await message.answer(
             f"Telegram-канал '{channel_title}' добавлен.\n\n"
-            "Теперь отправьте ссылку на ваш MAX-канал (например: https://max.ru/username).",
-            reply_markup=get_back_to_menu_keyboard()
+            "Шаг 2: Отправьте ссылку на MAX-канал (пример: https://max.ru/username)",
+            reply_markup=get_cancel_keyboard(),
+            disable_web_page_preview=True
         )
 
 
@@ -564,7 +554,7 @@ async def process_max_channel(message: Message, state: FSMContext):
                 for idx, chat in enumerate(available_chats):
                     match_found = False
                     chat_username_raw = None
-                    
+                        
                     # Ищем только по полю 'link' - сравниваем полные ссылки или последнюю часть
                     if 'link' in chat and chat['link']:
                         chat_link = chat['link']
@@ -580,27 +570,27 @@ async def process_max_channel(message: Message, state: FSMContext):
                         link_match = re.search(r'https?://(?:www\.)?max\.ru/([^/?#]+)', chat_link, re.IGNORECASE)
                         if link_match:
                             chat_username_raw = link_match.group(1)
-                    
-                    # Логируем сравнение для отладки
-                    logger.info("comparing_by_link", 
-                                chat_index=idx,
+                        
+                        # Логируем сравнение для отладки
+                        logger.info("comparing_by_link", 
+                                    chat_index=idx,
                                 user_link=user_input,
-                                chat_link=chat.get('link'),
+                                    chat_link=chat.get('link'),
                                 normalized_user=normalized_user_link,
                                 normalized_chat=normalized_chat_link if 'link' in chat and chat['link'] else None,
                                 user_part=user_link_part,
                                 chat_part=chat_link_part if 'link' in chat and chat['link'] else None,
-                                match=match_found)
-                    
-                    if match_found:
-                        found_chat = chat
-                        found_username_from_link = chat_username_raw
-                        logger.info("max_channel_found_by_link", 
+                                    match=match_found)
+                        
+                        if match_found:
+                            found_chat = chat
+                            found_username_from_link = chat_username_raw
+                            logger.info("max_channel_found_by_link", 
                                   user_link=user_input,
                                   found_link=chat.get('link'),
                                   found_username=found_username_from_link,
                                   chat_id=chat.get('id') or chat.get('chat_id'))
-                        break
+                            break
                 
                 if found_chat:
                     # Если нашли канал, извлекаем все данные
@@ -651,15 +641,15 @@ async def process_max_channel(message: Message, state: FSMContext):
                     
                     error_msg = (
                         f"❌ Не удалось найти канал по ссылке '{user_input}'.\n\n"
-                        "Возможные причины:\n"
-                        "• Бот не добавлен в канал как администратор\n"
-                        "• Ссылка указана неверно\n"
-                        "• Канал не существует или недоступен\n\n"
-                        "Убедитесь, что:\n"
-                        "1. Бот добавлен в канал как администратор\n"
-                        "2. Ссылка на канал указана правильно (https://max.ru/username)\n"
-                        "3. Канал существует в MAX"
-                    )
+                            "Возможные причины:\n"
+                            "• Бот не добавлен в канал как администратор\n"
+                            "• Ссылка указана неверно\n"
+                            "• Канал не существует или недоступен\n\n"
+                            "Убедитесь, что:\n"
+                            "1. Бот добавлен в канал как администратор\n"
+                            "2. Ссылка на канал указана правильно (https://max.ru/username)\n"
+                            "3. Канал существует в MAX"
+                        )
                     
                     await message.answer(error_msg, reply_markup=get_retry_keyboard("max_channel"))
                     return
@@ -743,10 +733,20 @@ async def process_max_channel(message: Message, state: FSMContext):
             
             await message.answer(
                 f"✅ Связь создана успешно!\n\n"
-                f"ID связи: {crossposting_link.id}\n"
                 f"Кросспостинг активирован.",
                 reply_markup=get_main_keyboard()
             )
+            
+            # Отправляем предложение миграции
+            migration_text = (
+                "Вы так же можете один раз перенести все старые посты из Telegram-канала в MAX-канал."
+            )
+            migration_keyboard = get_migration_offer_keyboard(crossposting_link.id)
+            await message.answer(
+                migration_text,
+                reply_markup=migration_keyboard
+            )
+            
             logger.info(
                 "crossposting_link_created",
                 link_id=crossposting_link.id,
@@ -1458,5 +1458,75 @@ async def message_status_detail(message: Message, state: FSMContext):
         
         keyboard = get_link_detail_keyboard(link_id, link.is_enabled)
         await message.answer(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("migrate_link_"))
+async def callback_migrate_link(callback: CallbackQuery, state: FSMContext):
+    """Обработчик инлайн-кнопки 'Перенести старые посты'."""
+    # Извлекаем ID связи из callback_data
+    match = re.search(r"migrate_link_(\d+)", callback.data)
+    if not match:
+        await callback.answer("Ошибка: не удалось определить ID связи.", show_alert=True)
+        return
+    
+    link_id = int(match.group(1))
+    user = await get_or_create_user(callback.from_user.id, callback.from_user.username)
+    
+    # Проверяем, что связь принадлежит пользователю
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(CrosspostingLink)
+            .options(
+                selectinload(CrosspostingLink.telegram_channel),
+                selectinload(CrosspostingLink.max_channel)
+            )
+            .where(CrosspostingLink.id == link_id)
+            .where(CrosspostingLink.user_id == user.id)
+        )
+        link = result.scalar_one_or_none()
+        
+        if not link:
+            await callback.answer("Связь не найдена или у вас нет доступа к ней.", show_alert=True)
+            return
+    
+    # Удаляем сообщение с кнопками
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning("failed_to_delete_migration_offer_message", error=str(e))
+    
+    # Подтверждаем нажатие кнопки
+    await callback.answer()
+    
+    # Запускаем миграцию в фоне
+    await state.set_state(MigrateStates.migrating)
+    await state.update_data(migrate_link_id=link_id)
+    
+    # Отправляем уведомление о начале
+    from app.bot.handlers_migration import start_migration
+    start_text = (
+        f"⚠️ Начинается перенос старых постов для связи #{link_id}\n\n"
+        f"Telegram: {link.telegram_channel.channel_title}\n"
+        f"MAX: {link.max_channel.channel_title}\n\n"
+        f"📋 Важно:\n"
+        f"• Постарайтесь не публиковать новые посты в Telegram канале до окончания переноса\n"
+        f"• Вы получите уведомление по окончании переноса\n\n"
+        f"⏳ Начинаю перенос (в зависимости от количества постов перенос может занять от нескольких минут до нескольких часов)..."
+    )
+    await callback.message.answer(start_text, reply_markup=get_back_to_menu_keyboard())
+    
+    # Запускаем миграцию в фоне
+    asyncio.create_task(start_migration(link_id, callback.from_user.id, callback.message.chat.id))
+
+
+@router.callback_query(F.data == "migrate_dismiss")
+async def callback_migrate_dismiss(callback: CallbackQuery):
+    """Обработчик инлайн-кнопки 'Не нужно' - удаляет сообщение."""
+    try:
+        await callback.message.delete()
+        await callback.answer()
+    except Exception as e:
+        logger.warning("failed_to_delete_migration_offer_message", error=str(e))
+        await callback.answer("Сообщение удалено.")
 
 

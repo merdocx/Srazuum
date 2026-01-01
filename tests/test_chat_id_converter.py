@@ -28,3 +28,4 @@ def test_convert_string_non_numeric():
     assert result == "abc"  # Возвращается как есть
 
 
+

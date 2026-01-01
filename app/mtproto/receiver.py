@@ -129,13 +129,28 @@ class MTProtoReceiver:
                 logger.debug(f"Пропущено служебное сообщение из канала {message.chat.id}")
                 return
             
-            logger.info(f"Получено сообщение из канала {message.chat.title} (ID: {message.chat.id})")
+            logger.info(
+                "Получено сообщение из канала",
+                channel_title=message.chat.title if message.chat else None,
+                channel_id=message.chat.id if message.chat else None,
+                message_id=message.id,
+                has_text=bool(message.text),
+                has_caption=bool(message.caption),
+                has_photo=bool(message.photo),
+                has_video=bool(message.video)
+            )
             
             # Обрабатываем сообщение с передачей клиента для загрузки медиа
             await self.message_processor.process_telegram_message(message, self.client)
             
         except Exception as e:
-            logger.error(f"Ошибка при обработке сообщения: {e}")
+            logger.error(
+                "Ошибка при обработке сообщения",
+                error=str(e),
+                channel_id=message.chat.id if message.chat else None,
+                message_id=message.id,
+                exc_info=True
+            )
     
     async def stop(self):
         """Остановка MTProto Receiver."""

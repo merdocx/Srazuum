@@ -55,6 +55,8 @@ class PostMigrator:
             "total": 0,
             "success": 0,
             "skipped": 0,
+            "skipped_empty": 0,  # Пустые сообщения
+            "skipped_duplicate": 0,  # Дубликаты
             "failed": 0
         }
         
@@ -67,13 +69,13 @@ class PostMigrator:
             # Получаем информацию о связи
             async with async_session_maker() as session:
                 result = await session.execute(
-                    select(CrosspostingLink)
-                    .options(
-                        selectinload(CrosspostingLink.telegram_channel),
-                        selectinload(CrosspostingLink.max_channel)
-                    )
-                    .where(CrosspostingLink.id == link_id)
+                select(CrosspostingLink)
+                .options(
+                    selectinload(CrosspostingLink.telegram_channel),
+                    selectinload(CrosspostingLink.max_channel)
                 )
+                .where(CrosspostingLink.id == link_id)
+            )
                 link = result.scalar_one_or_none()
                 
                 if not link:
@@ -141,7 +143,7 @@ class PostMigrator:
             
             logger.info(
                 "messages_grouped",
-                link_id=link_id,
+                           link_id=link_id,
                 total_messages=stats["total"],
                 media_groups=len(grouped_messages),
                 standalone_messages=len(standalone_messages)
@@ -176,7 +178,7 @@ class PostMigrator:
             
             logger.info(
                 "items_sorted_for_migration",
-                link_id=link_id,
+                               link_id=link_id,
                 total_items=len(items_to_process_sorted),
                 media_groups=len(grouped_messages),
                 standalone_messages=len(standalone_messages)
@@ -243,6 +245,7 @@ class PostMigrator:
                     # Пропускаем пустые сообщения
                     if not has_content:
                         stats["skipped"] += 1
+                        stats["skipped_empty"] += 1
                         logger.info("post_skipped_empty", message_id=msg.id, link_id=link_id, processed=processed_count, total=len(items_to_process_sorted))
                         continue
                     
@@ -259,6 +262,7 @@ class PostMigrator:
                             logger.info("post_migrated_success", message_id=msg.id, link_id=link_id, processed=processed_count, total=len(items_to_process_sorted))
                         else:
                             stats["skipped"] += 1
+                            stats["skipped_duplicate"] += 1
                             logger.info("post_skipped", message_id=msg.id, link_id=link_id, processed=processed_count, total=len(items_to_process_sorted))
                             
                     except Exception as e:
@@ -276,7 +280,7 @@ class PostMigrator:
             
             logger.info(
                 "migration_completed",
-                link_id=link_id,
+                                               link_id=link_id,
                 total=stats["total"],
                 success=stats["success"],
                 skipped=stats["skipped"],
@@ -292,25 +296,114 @@ class PostMigrator:
         finally:
             # Восстанавливаем кросспостинг для связи (включаем обратно, если был включен до миграции)
             if link_was_enabled is not None:
-                async with async_session_maker() as session:
-                    result = await session.execute(
-                        select(CrosspostingLink).where(CrosspostingLink.id == link_id)
-                    )
-                    link = result.scalar_one_or_none()
-                    if link:
-                        if link_was_enabled:
-                            # Включаем обратно, если был включен до миграции
-                            link.is_enabled = True
-                            await session.commit()
-                            # Очищаем кэш связей для этого канала, чтобы обновить список активных связей
-                            if telegram_channel_db_id:
-                                from app.utils.cache import delete_cache
-                                cache_key = f"channel_links:{telegram_channel_db_id}"
-                                await delete_cache(cache_key)
-                            logger.info("crossposting_resumed_after_migration", link_id=link_id, telegram_channel_db_id=telegram_channel_db_id)
-                        else:
-                            # Оставляем отключенным, если был отключен до миграции
-                            logger.info("crossposting_remains_disabled_after_migration", link_id=link_id)
+                try:
+                    async with async_session_maker() as session:
+                        result = await session.execute(
+                            select(CrosspostingLink).where(CrosspostingLink.id == link_id)
+                        )
+                        link = result.scalar_one_or_none()
+                        if link:
+                            if link_was_enabled:
+                                # Включаем обратно, если был включен до миграции
+                                link.is_enabled = True
+                                await session.commit()
+                                logger.info("link_enabled_after_migration", link_id=link_id, is_enabled=link.is_enabled)
+                                
+                                # ВАЖНО: Пересоздаем кэш после коммита, используя новую сессию для гарантии актуальности данных
+                                # В process_message используется telegram_channel_db_id (ID записи в БД) как ключ кэша
+                                if telegram_channel_db_id:
+                                    from app.utils.cache import set_cache, delete_cache, get_cache
+                                    cache_key = f"channel_links:{telegram_channel_db_id}"
+                                    
+                                    # Используем новую сессию для загрузки активных связей после коммита
+                                    async with async_session_maker() as new_session:
+                                        result = await new_session.execute(
+                                            select(CrosspostingLink)
+                                            .where(CrosspostingLink.telegram_channel_id == telegram_channel_db_id)
+                                            .where(CrosspostingLink.is_enabled == True)
+                                        )
+                                        active_links = result.scalars().all()
+                                        
+                                        if active_links:
+                                            link_ids = [link.id for link in active_links]
+                                            # ВАЖНО: Сначала очищаем старый кэш (если есть), затем создаем новый
+                                            # Это гарантирует, что кэш всегда актуален
+                                            await delete_cache(cache_key)
+                                            # Создаем новый кэш с актуальными данными
+                                            await set_cache(cache_key, link_ids)
+                                            # Проверяем, что кэш действительно создан и содержит правильные данные
+                                            verify_cache = await get_cache(cache_key)
+                                            logger.info(
+                                                "cache_recreated_after_migration",
+                                                cache_key=cache_key,
+                                                link_ids=link_ids,
+                                                link_id=link_id,
+                                                active_links_count=len(active_links),
+                                                cache_verified=verify_cache is not None,
+                                                cached_link_ids=verify_cache,
+                                                cache_match=verify_cache == link_ids
+                                            )
+                                        else:
+                                            # Если активных связей нет, очищаем кэш
+                                            deleted = await delete_cache(cache_key)
+                                            logger.warning("cache_cleared_after_migration_no_links", cache_key=cache_key, link_id=link_id, cache_deleted=deleted)
+                                
+                                logger.info(
+                                    "crossposting_resumed_after_migration",
+                                    link_id=link_id,
+                                    telegram_channel_db_id=telegram_channel_db_id,
+                                    is_enabled=link.is_enabled,
+                                    cache_key=cache_key,
+                                    cache_ready=True
+                                )
+                                # ВАЖНО: Убеждаемся, что MTProto receiver продолжает работать
+                                # Проверяем, что кэш действительно создан и готов к использованию
+                                final_cache_check = await get_cache(cache_key)
+                                if final_cache_check:
+                                    logger.info(
+                                        "cache_verified_after_migration",
+                                        link_id=link_id,
+                                        cache_key=cache_key,
+                                        cached_link_ids=final_cache_check,
+                                        mtproto_receiver_should_work=True
+                                    )
+                                else:
+                                    logger.error(
+                                        "cache_not_found_after_migration",
+                                        link_id=link_id,
+                                        cache_key=cache_key,
+                                        mtproto_receiver_may_not_work=True
+                                    )
+                                # ВАЖНО: Перезапускаем MTProto receiver после миграции
+                                # чтобы убедиться, что он продолжает получать сообщения
+                                try:
+                                    import subprocess
+                                    result = subprocess.run(
+                                        ["systemctl", "restart", "crossposting-mtproto.service"],
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=10
+                                    )
+                                    if result.returncode == 0:
+                                        logger.info("mtproto_receiver_restarted_after_migration", link_id=link_id)
+                                    else:
+                                        logger.warning(
+                                            "mtproto_receiver_restart_failed",
+                                            link_id=link_id,
+                                            error=result.stderr
+                                        )
+                                except Exception as e:
+                                    logger.error(
+                                        "failed_to_restart_mtproto_receiver",
+                                        link_id=link_id,
+                                        error=str(e),
+                                        exc_info=True
+                                    )
+                            else:
+                                # Оставляем отключенным, если был отключен до миграции
+                                logger.info("crossposting_remains_disabled_after_migration", link_id=link_id)
+                except Exception as e:
+                    logger.error("failed_to_resume_crossposting_after_migration", link_id=link_id, error=str(e), exc_info=True)
             
             # Очищаем старые медиа-файлы (старше 1 часа) после завершения миграции
             try:
@@ -354,7 +447,7 @@ class PostMigrator:
             # Возвращаем от старых к новым
             for message in messages:
                 yield message
-                
+            
         except Exception as e:
             logger.error("failed_to_get_chat_history", chat_identifier=chat_identifier, error=str(e))
             raise
@@ -457,9 +550,17 @@ class PostMigrator:
             )
             
             if success:
-                existing_ids.add(message.id)
-                logger.debug("post_migrated_successfully", message_id=message.id, link_id=link_id)
-                return True
+                # Проверяем, был ли пост действительно перенесен сейчас или уже был перенесен ранее
+                # Если process_message вернул True, но пост уже был в existing_ids, значит он был пропущен как дубликат
+                if message.id in existing_ids:
+                    # Пост уже был перенесен ранее - это дубликат, не считаем как success
+                    logger.debug("post_already_migrated_duplicate", message_id=message.id, link_id=link_id)
+                    return False
+                else:
+                    # Пост успешно перенесен сейчас
+                    existing_ids.add(message.id)
+                    logger.debug("post_migrated_successfully", message_id=message.id, link_id=link_id)
+                    return True
             else:
                 logger.warning("post_migration_failed_no_success", message_id=message.id, link_id=link_id)
                 return False
@@ -573,4 +674,4 @@ class PostMigrator:
             message_data["parse_mode"] = parse_mode
         
         return message_data
-    
+

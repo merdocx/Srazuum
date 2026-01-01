@@ -39,3 +39,4 @@ async def periodic_media_cleanup():
             await asyncio.sleep(60)  # Короткая пауза перед следующей попыткой
 
 
+

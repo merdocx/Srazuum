@@ -1,5 +1,5 @@
 """Клавиатуры для Telegram бота."""
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from typing import List, Optional
 
 
@@ -158,6 +158,24 @@ def get_back_to_menu_keyboard() -> ReplyKeyboardMarkup:
     return keyboard
 
 
+def get_cancel_keyboard() -> ReplyKeyboardMarkup:
+    """
+    Клавиатура с кнопкой "Отмена" для отмены процесса создания связи.
+    
+    Returns:
+        ReplyKeyboardMarkup
+    """
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="❌ Отмена")
+            ]
+        ],
+        resize_keyboard=True
+    )
+    return keyboard
+
+
 def get_retry_keyboard(state: str = None) -> ReplyKeyboardMarkup:
     """
     Клавиатура для ошибок с кнопками "Повторить" и "Главное меню".
@@ -210,3 +228,32 @@ def get_migrate_links_keyboard(links: List[dict]) -> ReplyKeyboardMarkup:
     ])
     
     return ReplyKeyboardMarkup(keyboard=keyboard_buttons, resize_keyboard=True)
+
+
+def get_migration_offer_keyboard(link_id: int) -> InlineKeyboardMarkup:
+    """
+    Инлайн-клавиатура для предложения миграции после создания связи.
+    
+    Args:
+        link_id: ID только что созданной связи
+    
+    Returns:
+        InlineKeyboardMarkup с кнопками миграции
+    """
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📥 Перенести старые посты",
+                    callback_data=f"migrate_link_{link_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Не нужно",
+                    callback_data=f"migrate_dismiss"
+                )
+            ]
+        ]
+    )
+    return keyboard

@@ -65,6 +65,7 @@ class MessageProcessor:
             async with session.begin():
                 try:
                     # Если передан link_id (миграция), обрабатываем только эту связь
+                    # ВАЖНО: При миграции не проверяем is_enabled, так как связь временно отключается во время миграции
                     if link_id:
                         result = await session.execute(
                             select(CrosspostingLink)
@@ -76,9 +77,9 @@ class MessageProcessor:
                         )
                         link = result.scalar_one_or_none()
                         if not link:
-                            logger.debug("link_not_found_for_migration", link_id=link_id, telegram_channel_id=telegram_channel_id)
+                            logger.warning("link_not_found_for_migration", link_id=link_id, telegram_channel_id=telegram_channel_id)
                             return False
-                        links_to_process = [link]
+                        links = [link]
                     else:
                         # Получаем активные связи с eager loading для оптимизации
                         cache_key = f"channel_links:{telegram_channel_id}"
@@ -87,6 +88,7 @@ class MessageProcessor:
                         if cached_data and isinstance(cached_data, list) and len(cached_data) > 0:
                             # Используем кэш
                             link_ids = cached_data
+                            logger.info("using_cache_for_links", cache_key=cache_key, link_ids=link_ids, telegram_channel_id=telegram_channel_id)
                             result = await session.execute(
                                 select(CrosspostingLink)
                                 .options(
@@ -97,8 +99,38 @@ class MessageProcessor:
                                 .where(CrosspostingLink.is_enabled == True)
                             )
                             links: List[CrosspostingLink] = result.scalars().all()
+                            logger.info("links_from_cache", cache_key=cache_key, cached_link_ids=link_ids, found_links_count=len(links), telegram_channel_id=telegram_channel_id)
+                            if len(links) == 0 and len(link_ids) > 0:
+                                # Проблема: кэш содержит ID связей, но они не найдены в БД или отключены
+                                # Это может произойти после миграции, если кэш был создан до коммита или данные изменились
+                                # Очищаем кэш и перезагружаем связи из БД
+                                logger.warning("cache_contains_invalid_links", cache_key=cache_key, cached_link_ids=link_ids, telegram_channel_id=telegram_channel_id)
+                                from app.utils.cache import delete_cache
+                                await delete_cache(cache_key)
+                                # Перезагружаем связи из БД с актуальными данными
+                                result = await session.execute(
+                                    select(CrosspostingLink)
+                                    .options(
+                                        selectinload(CrosspostingLink.max_channel),
+                                        selectinload(CrosspostingLink.telegram_channel)
+                                    )
+                                    .where(CrosspostingLink.telegram_channel_id == telegram_channel_id)
+                                    .where(CrosspostingLink.is_enabled == True)
+                                )
+                                links = result.scalars().all()
+                                logger.info("links_reloaded_after_cache_invalidation", cache_key=cache_key, found_links_count=len(links), telegram_channel_id=telegram_channel_id)
+                                # Обновляем кэш с актуальными данными
+                                if links:
+                                    link_ids = [link.id for link in links]
+                                    await set_cache(cache_key, link_ids)
+                                    # Проверяем, что кэш обновлен правильно
+                                    verify_cache = await get_cache(cache_key)
+                                    logger.info("cache_updated_after_invalidation", cache_key=cache_key, link_ids=link_ids, telegram_channel_id=telegram_channel_id, cache_verified=verify_cache == link_ids)
+                                else:
+                                    logger.warning("no_active_links_after_cache_invalidation", cache_key=cache_key, telegram_channel_id=telegram_channel_id)
                         else:
                             # Поиск активных связей для канала с eager loading
+                            logger.warning("cache_miss_or_empty", cache_key=cache_key, telegram_channel_id=telegram_channel_id)
                             result = await session.execute(
                                 select(CrosspostingLink)
                                 .options(
@@ -109,36 +141,46 @@ class MessageProcessor:
                                 .where(CrosspostingLink.is_enabled == True)
                             )
                             links = result.scalars().all()
+                            logger.info("links_from_db", cache_key=cache_key, found_links_count=len(links), telegram_channel_id=telegram_channel_id)
                             
                             # Кэширование ID связей
                             if links:
                                 link_ids = [link.id for link in links]
                                 await set_cache(cache_key, link_ids)
-                        
-                        if not links:
-                            logger.debug("no_active_links", telegram_channel_id=telegram_channel_id)
-                            return False
-                        
-                        # Проверка на дубликат для всех связей одним запросом
-                        # ВАЖНО: Проверяем только записи со статусом SUCCESS, чтобы не пропускать
-                        # сообщения, которые были обработаны с ошибкой (FAILED) или еще обрабатываются (PENDING)
-                        link_ids_list = [link.id for link in links]
-                        existing_logs = await session.execute(
-                            select(MessageLog)
-                            .where(
-                                MessageLog.crossposting_link_id.in_(link_ids_list),
-                                MessageLog.telegram_message_id == telegram_message_id,
-                                MessageLog.status == MessageStatus.SUCCESS.value
+                                logger.info("cache_updated", cache_key=cache_key, link_ids=link_ids, telegram_channel_id=telegram_channel_id)
+                    
+                    if not links:
+                        logger.warning("no_active_links", telegram_channel_id=telegram_channel_id, cache_key=cache_key, link_id=link_id)
+                        # Дополнительная проверка: возможно, связь отключена или удалена
+                        async with async_session_maker() as check_session:
+                            result = await check_session.execute(
+                                select(CrosspostingLink)
+                                .where(CrosspostingLink.telegram_channel_id == telegram_channel_id)
                             )
+                            all_links = result.scalars().all()
+                            logger.warning("all_links_for_channel", telegram_channel_id=telegram_channel_id, total_links=len(all_links), enabled_links=sum(1 for l in all_links if l.is_enabled))
+                        return False
+                    
+                    # Проверка на дубликат для всех связей одним запросом
+                    # ВАЖНО: Проверяем только записи со статусом SUCCESS, чтобы не пропускать
+                    # сообщения, которые были обработаны с ошибкой (FAILED) или еще обрабатываются (PENDING)
+                    link_ids_list = [link.id for link in links]
+                    existing_logs = await session.execute(
+                        select(MessageLog)
+                        .where(
+                            MessageLog.crossposting_link_id.in_(link_ids_list),
+                            MessageLog.telegram_message_id == telegram_message_id,
+                            MessageLog.status == MessageStatus.SUCCESS.value
                         )
-                        existing_link_ids = {log.crossposting_link_id for log in existing_logs.scalars().all()}
-                        
-                        # Обрабатываем только те связи, для которых еще нет успешного лога
-                        links_to_process = [link for link in links if link.id not in existing_link_ids]
-                        
-                        if not links_to_process:
-                            logger.debug("all_messages_duplicate", telegram_channel_id=telegram_channel_id, message_id=telegram_message_id)
-                            return True
+                    )
+                    existing_link_ids = {log.crossposting_link_id for log in existing_logs.scalars().all()}
+                    
+                    # Обрабатываем только те связи, для которых еще нет успешного лога
+                    links_to_process = [link for link in links if link.id not in existing_link_ids]
+                    
+                    if not links_to_process:
+                        logger.debug("all_messages_duplicate", telegram_channel_id=telegram_channel_id, message_id=telegram_message_id)
+                        return True
                     
                     # Обрабатываем каждую связь
                     success_count = 0
@@ -508,7 +550,7 @@ class MessageProcessor:
         # Получаем ID канала Telegram
         telegram_chat_id = message.chat.id if message.chat else None
         if not telegram_chat_id:
-            return
+                        return
         
         # Если сообщение входит в медиа-группу, обрабатываем через handler
         if hasattr(message, 'media_group_id') and message.media_group_id is not None:
@@ -672,12 +714,26 @@ class MessageProcessor:
             
             # Используем ID записи в БД для поиска связей
             telegram_channel_id = telegram_channel.id
+            logger.info(
+                "processing_message_from_telegram",
+                telegram_channel_db_id=telegram_channel_id,
+                telegram_chat_id=telegram_chat_id,
+                message_id=message.id,
+                channel_title=message.chat.title if message.chat else None
+            )
         
         # Обрабатываем сообщение
-        await self.process_message(
+        result = await self.process_message(
             telegram_channel_id=telegram_channel_id,
             telegram_message_id=message.id,
             message_data=message_data
+        )
+        logger.info(
+            "process_message_result",
+            telegram_channel_id=telegram_channel_id,
+            message_id=message.id,
+            result=result,
+            success=result is True
         )
     
     async def _process_media_group(self, messages: List, client=None, link_id: Optional[int] = None) -> None:
@@ -856,14 +912,14 @@ class MessageProcessor:
             logger.warning("no_media_in_media_group")
             return
         
-        logger.info(
-            "processing_media_group",
-            media_type=media_type,
-            media_count=len(media_data),
+            logger.info(
+                "processing_media_group",
+                media_type=media_type,
+                media_count=len(media_data),
             channel_id=telegram_chat_id
-        )
+            )
         
-        # Отправляем группу медиа
+            # Отправляем группу медиа
         # КРИТИЧНО: Передаем messages всегда, чтобы можно было обновить MessageLog
         await self._send_media_group(telegram_channel_id, media_data, media_type, caption, caption_parse_mode, client, link_id=link_id, messages=messages)
     

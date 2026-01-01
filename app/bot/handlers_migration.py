@@ -222,13 +222,25 @@ async def start_migration(link_id: int, user_id: int, chat_id: int):
         duration_seconds = int(duration % 60) if duration else 0
         duration_text = f"{duration_minutes} мин {duration_seconds} сек" if duration_minutes > 0 else f"{duration_seconds} сек"
         
+        skipped = result.get('skipped', 0)
+        skipped_empty = result.get('skipped_empty', 0)
+        skipped_duplicate = result.get('skipped_duplicate', 0)
+        
+        skipped_lines = []
+        if skipped_empty > 0:
+            skipped_lines.append(f"• Пропущено (пустые): {skipped_empty}")
+        if skipped_duplicate > 0:
+            skipped_lines.append(f"• Пропущено (уже были): {skipped_duplicate}")
+        
+        skipped_text = "\n".join(skipped_lines) if skipped_lines else ""
+        
         final_text = (
             f"✅ Перенос старых постов завершен для связи #{link_id}\n\n"
             f"📊 Статистика:\n"
             f"• Всего постов: {result.get('total', 0)}\n"
             f"• Успешно перенесено: {result.get('success', 0)}\n"
-            f"• Пропущено (уже были): {result.get('skipped', 0)}\n"
-            f"• Не удалось перенести: {result.get('failed', 0)}\n\n"
+            + (f"{skipped_text}\n" if skipped_text else "")
+            + f"• Не удалось перенести: {result.get('failed', 0)}\n\n"
             f"⏱ Время переноса: {duration_text}"
         )
         
