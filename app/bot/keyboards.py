@@ -257,3 +257,21 @@ def get_migration_offer_keyboard(link_id: int) -> InlineKeyboardMarkup:
         ]
     )
     return keyboard
+
+
+def get_stop_migration_keyboard() -> ReplyKeyboardMarkup:
+    """
+    Клавиатура с кнопкой "Остановить миграцию" во время миграции.
+    
+    Returns:
+        ReplyKeyboardMarkup с кнопкой остановки миграции
+    """
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="⏹ Остановить миграцию")
+            ]
+        ],
+        resize_keyboard=True
+    )
+    return keyboard

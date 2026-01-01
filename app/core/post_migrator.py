@@ -131,23 +131,31 @@ class PostMigrator:
             async for message in self._get_chat_history_stream(chat_identifier):
                 all_messages.append(message)
             
-            stats["total"] = len(all_messages)
-            logger.info("chat_history_loaded", total_messages=stats["total"])
+            logger.info("chat_history_loaded", total_messages=len(all_messages))
             
-            if stats["total"] == 0:
+            if len(all_messages) == 0:
                 logger.info("no_messages_to_migrate", link_id=link_id)
                 return stats
             
             # ОПТИМИЗАЦИЯ: Предварительная группировка медиа-групп
             grouped_messages, standalone_messages = self._group_messages_by_media_group(all_messages)
             
+            # ВАЖНО: Считаем количество постов, а не сообщений
+            # Медиа-группа = 1 пост, отдельное сообщение = 1 пост
+            stats["total"] = len(grouped_messages) + len(standalone_messages)
+            
             logger.info(
                 "messages_grouped",
-                           link_id=link_id,
-                total_messages=stats["total"],
+                link_id=link_id,
+                total_messages=len(all_messages),
+                total_posts=stats["total"],
                 media_groups=len(grouped_messages),
                 standalone_messages=len(standalone_messages)
             )
+            
+            if stats["total"] == 0:
+                logger.info("no_posts_to_migrate", link_id=link_id)
+                return stats
             
             # КРИТИЧНО: Объединяем медиа-группы и отдельные посты в один список для сохранения хронологического порядка
             # Создаем список элементов для обработки: каждая медиа-группа и каждый отдельный пост
@@ -192,13 +200,14 @@ class PostMigrator:
                 if item["type"] == "media_group":
                     # Обработка медиа-группы
                     group = item["group"]
-                    processed_count += len(group)
+                    processed_count += 1  # Считаем как 1 пост
                     
                     # Проверка на дублирование для медиа-группы
                     group_ids = {msg.id for msg in group}
                     if any(msg_id in existing_message_ids for msg_id in group_ids):
-                        stats["skipped"] += len(group)
-                        logger.debug("media_group_skipped_duplicate", group_size=len(group))
+                        stats["skipped"] += 1  # Считаем как 1 пропущенный пост
+                        stats["skipped_duplicate"] += 1
+                        logger.debug("media_group_skipped_duplicate", group_size=len(group), link_id=link_id)
                         continue
                     
                     # Обработка медиа-группы
@@ -214,12 +223,12 @@ class PostMigrator:
                         for msg in group:
                             existing_message_ids.add(msg.id)
                         
-                        stats["success"] += len(group)
+                        stats["success"] += 1  # Считаем как 1 успешный пост
                         logger.info("media_group_migrated", group_size=len(group), link_id=link_id)
                         
                     except Exception as e:
-                        stats["failed"] += len(group)
-                        logger.error("media_group_migration_failed", error=str(e), group_size=len(group), exc_info=True)
+                        stats["failed"] += 1  # Считаем как 1 неудачный пост
+                        logger.error("media_group_migration_failed", error=str(e), group_size=len(group), link_id=link_id, exc_info=True)
                 
                 elif item["type"] == "standalone":
                     # Обработка отдельного поста
@@ -280,11 +289,13 @@ class PostMigrator:
             
             logger.info(
                 "migration_completed",
-                                               link_id=link_id,
-                total=stats["total"],
-                success=stats["success"],
-                skipped=stats["skipped"],
-                failed=stats["failed"],
+                link_id=link_id,
+                total_posts=stats["total"],
+                success_posts=stats["success"],
+                skipped_posts=stats["skipped"],
+                skipped_empty=stats["skipped_empty"],
+                skipped_duplicate=stats["skipped_duplicate"],
+                failed_posts=stats["failed"],
                 processed=processed_count
             )
             

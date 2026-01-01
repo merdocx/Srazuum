@@ -11,12 +11,13 @@ import os
 import asyncio
 
 from app.models.crossposting_link import CrosspostingLink
+from app.models.user import User
 from app.core.post_migrator import PostMigrator
 from app.core.message_processor import MessageProcessor
 from app.core.migration_queue import migration_queue
 from app.bot.handlers import get_or_create_user, router
 from app.bot.handlers import MigrateStates
-from app.bot.keyboards import get_main_keyboard, get_migrate_links_keyboard, get_back_to_menu_keyboard
+from app.bot.keyboards import get_main_keyboard, get_migrate_links_keyboard, get_back_to_menu_keyboard, get_stop_migration_keyboard
 from config.database import async_session_maker
 from app.utils.logger import get_logger
 
@@ -117,18 +118,115 @@ async def message_migrate_link(message: Message, state: FSMContext):
         
         # Отправляем уведомление о начале
         start_text = (
-            f"⚠️ Начинается перенос старых постов для связи #{link_id}\n\n"
+            f"⚠️ Начинается перенос старых постов\n\n"
             f"Telegram: {link.telegram_channel.channel_title}\n"
             f"MAX: {link.max_channel.channel_title}\n\n"
             f"📋 Важно:\n"
-            f"• Постарайтесь не публиковать новые посты в Telegram канале до окончания переноса\n"
-            f"• Вы получите уведомление по окончании переноса\n\n"
-            f"⏳ Начинаю перенос (в зависимости от количества постов перенос может занять от нескольких минут до нескольких часов)..."
+            f"• Не публикуйте новые посты в Telegram-канале до окончания переноса\n"
+            f"• В зависимости от количества постов перенос может занять некоторое время\n\n"
+            f"⏳ Начинаю перенос, вы получите уведомление по окончании переноса"
         )
-        await message.answer(start_text, reply_markup=get_back_to_menu_keyboard())
+        await message.answer(start_text, reply_markup=get_stop_migration_keyboard())
         
         # Запускаем миграцию в фоне
         asyncio.create_task(start_migration(link_id, message.from_user.id, message.chat.id))
+
+
+@router.message(F.text == "⏹ Остановить миграцию")
+async def message_stop_migration(message: Message, state: FSMContext):
+    """Обработчик кнопки 'Остановить миграцию'."""
+    user = await get_or_create_user(message.from_user.id, message.from_user.username)
+    
+    # Получаем link_id из состояния
+    data = await state.get_data()
+    link_id = data.get("migrate_link_id")
+    
+    if not link_id:
+        await message.answer("❌ Не найдена активная миграция.", reply_markup=get_main_keyboard())
+        await state.clear()
+        return
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(CrosspostingLink)
+            .options(
+                selectinload(CrosspostingLink.telegram_channel),
+                selectinload(CrosspostingLink.max_channel)
+            )
+            .where(CrosspostingLink.id == link_id)
+            .where(CrosspostingLink.user_id == user.id)
+        )
+        link = result.scalar_one_or_none()
+        
+        if not link:
+            await message.answer("❌ Связь не найдена или у вас нет доступа к ней.", reply_markup=get_main_keyboard())
+            await state.clear()
+            return
+    
+    # Останавливаем миграцию
+    await migration_queue.stop_migration(link_id)
+    
+    # Включаем кросспостинг (по аналогии с окончанием миграции)
+    # Во время миграции связь отключается, поэтому включаем её обратно
+    telegram_channel_db_id = link.telegram_channel.id
+    
+    if not link.is_enabled:
+        # Включаем кросспостинг, если он был отключен во время миграции
+        link.is_enabled = True
+        await session.commit()
+        logger.info("link_enabled_after_stopping_migration", link_id=link_id, is_enabled=link.is_enabled)
+        
+        # Пересоздаем кэш
+        if telegram_channel_db_id:
+            from app.utils.cache import set_cache, delete_cache, get_cache
+            cache_key = f"channel_links:{telegram_channel_db_id}"
+            
+            async with async_session_maker() as new_session:
+                result = await new_session.execute(
+                    select(CrosspostingLink)
+                    .where(CrosspostingLink.telegram_channel_id == telegram_channel_db_id)
+                    .where(CrosspostingLink.is_enabled == True)
+                )
+                active_links = result.scalars().all()
+                
+                if active_links:
+                    link_ids = [link.id for link in active_links]
+                    await delete_cache(cache_key)
+                    await set_cache(cache_key, link_ids)
+                    logger.info("cache_recreated_after_stopping_migration", cache_key=cache_key, link_ids=link_ids, link_id=link_id)
+    
+    # ВАЖНО: Перезапускаем MTProto receiver после остановки миграции
+    # чтобы убедиться, что он продолжает получать сообщения
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["systemctl", "restart", "crossposting-mtproto.service"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode == 0:
+            logger.info("mtproto_receiver_restarted_after_stopping_migration", link_id=link_id)
+        else:
+            logger.warning(
+                "mtproto_receiver_restart_failed_after_stopping_migration",
+                link_id=link_id,
+                error=result.stderr
+            )
+    except Exception as e:
+        logger.error(
+            "failed_to_restart_mtproto_receiver_after_stopping_migration",
+            link_id=link_id,
+            error=str(e),
+            exc_info=True
+        )
+    
+    await message.answer(
+        "✅ Миграция остановлена. Кросспостинг включен.",
+        reply_markup=get_main_keyboard()
+    )
+    await state.clear()
+    logger.info("migration_stopped_by_user", link_id=link_id, user_id=user.id)
 
 
 async def start_migration(link_id: int, user_id: int, chat_id: int):
@@ -235,7 +333,7 @@ async def start_migration(link_id: int, user_id: int, chat_id: int):
         skipped_text = "\n".join(skipped_lines) if skipped_lines else ""
         
         final_text = (
-            f"✅ Перенос старых постов завершен для связи #{link_id}\n\n"
+            f"✅ Перенос старых постов завершен\n\n"
             f"📊 Статистика:\n"
             f"• Всего постов: {result.get('total', 0)}\n"
             f"• Успешно перенесено: {result.get('success', 0)}\n"
@@ -245,7 +343,7 @@ async def start_migration(link_id: int, user_id: int, chat_id: int):
         )
         
         try:
-            await bot.send_message(chat_id, final_text, reply_markup=get_back_to_menu_keyboard())
+            await bot.send_message(chat_id, final_text, reply_markup=get_main_keyboard())
             logger.info("migration_completed_notification_sent", link_id=link_id, result=result)
         except Exception as send_error:
             logger.error("failed_to_send_completion_notification", link_id=link_id, error=str(send_error), exc_info=True)
@@ -265,7 +363,7 @@ async def start_migration(link_id: int, user_id: int, chat_id: int):
                 f"Попробуйте позже или обратитесь в поддержку."
             )
             try:
-                await bot.send_message(chat_id, error_text, reply_markup=get_back_to_menu_keyboard())
+                await bot.send_message(chat_id, error_text, reply_markup=get_main_keyboard())
             except Exception as send_error:
                 logger.error("failed_to_send_error_message", error=str(send_error))
     finally:

@@ -31,7 +31,8 @@ from app.bot.keyboards import (
     get_retry_keyboard,
     get_migrate_links_keyboard,
     get_migration_offer_keyboard,
-    get_cancel_keyboard
+    get_cancel_keyboard,
+    get_stop_migration_keyboard
 )
 from config.database import async_session_maker
 from config.settings import settings
@@ -1505,15 +1506,15 @@ async def callback_migrate_link(callback: CallbackQuery, state: FSMContext):
     # Отправляем уведомление о начале
     from app.bot.handlers_migration import start_migration
     start_text = (
-        f"⚠️ Начинается перенос старых постов для связи #{link_id}\n\n"
+        f"⚠️ Начинается перенос старых постов\n\n"
         f"Telegram: {link.telegram_channel.channel_title}\n"
         f"MAX: {link.max_channel.channel_title}\n\n"
         f"📋 Важно:\n"
-        f"• Постарайтесь не публиковать новые посты в Telegram канале до окончания переноса\n"
-        f"• Вы получите уведомление по окончании переноса\n\n"
-        f"⏳ Начинаю перенос (в зависимости от количества постов перенос может занять от нескольких минут до нескольких часов)..."
+        f"• Не публикуйте новые посты в Telegram-канале до окончания переноса\n"
+        f"• В зависимости от количества постов перенос может занять некоторое время\n\n"
+        f"⏳ Начинаю перенос, вы получите уведомление по окончании переноса"
     )
-    await callback.message.answer(start_text, reply_markup=get_back_to_menu_keyboard())
+    await callback.message.answer(start_text, reply_markup=get_stop_migration_keyboard())
     
     # Запускаем миграцию в фоне
     asyncio.create_task(start_migration(link_id, callback.from_user.id, callback.message.chat.id))
