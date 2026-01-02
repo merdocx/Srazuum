@@ -39,6 +39,8 @@ class MessageProcessor:
         self.max_client = MaxAPIClient()
         from app.core.media_group_handler import MediaGroupHandler
         self.media_group_handler = MediaGroupHandler(timeout_seconds=2)
+        # Семафор для ограничения параллелизма при обработке связей
+        self.crossposting_semaphore = asyncio.Semaphore(settings.crossposting_parallel_links)
     
     async def process_message(
         self,
@@ -315,9 +317,14 @@ class MessageProcessor:
                             )
                             return (link.id, None, error_msg, processing_time)
                     
-                    # Параллельная обработка всех связей
+                    # Параллельная обработка всех связей с ограничением через семафор
+                    async def process_link_with_semaphore(link: CrosspostingLink, message_log: MessageLog):
+                        """Обработать связь с ограничением параллелизма через семафор."""
+                        async with self.crossposting_semaphore:
+                            return await process_link(link, message_log)
+                    
                     results = await asyncio.gather(*[
-                        process_link(link, message_log)
+                        process_link_with_semaphore(link, message_log)
                         for link, message_log in message_logs
                     ], return_exceptions=True)
                     
@@ -664,7 +671,18 @@ class MessageProcessor:
         except APIError:
             # Если это уже APIError, пробрасываем как есть (не оборачиваем)
             raise
+        except (DatabaseError, MediaProcessingError) as e:
+            # Внутренние ошибки - логируем и пробрасываем как APIError для единообразия
+            logger.error("internal_error_in_send_to_max", error=str(e), error_type=type(e).__name__, exc_info=True)
+            raise APIError(f"Внутренняя ошибка при отправке в MAX: {e}")
         except Exception as e:
+            # Неожиданные ошибки - логируем с полной информацией
+            logger.error(
+                "unexpected_error_in_send_to_max",
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True
+            )
             raise APIError(f"Неожиданная ошибка при отправке в MAX: {e}")
     
     async def process_telegram_message(self, message, client=None):
@@ -986,17 +1004,38 @@ class MessageProcessor:
                     result=result,
                     success=result is True
                 )
-        except Exception as e:
-            # КРИТИЧНО: Обрабатываем любые ошибки при обработке сообщения из Telegram
-            # Логируем ошибку, но не прерываем кросспостинг - продолжаем со следующего сообщения
+        except (APIError, httpx.HTTPStatusError, httpx.RequestError, asyncio.TimeoutError) as e:
+            # Ошибки API при обработке сообщения
             logger.error(
-                "error_processing_telegram_message",
+                "error_processing_telegram_message_api",
                 message_id=message.id if message else None,
                 chat_id=message.chat.id if message and message.chat else None,
                 error=str(e),
+                error_type=type(e).__name__,
                 exc_info=True
             )
-            # Просто возвращаемся - сообщение пропущено, кросспостинг продолжается
+            return
+        except (DatabaseError, MediaProcessingError) as e:
+            # Ошибки БД или обработки медиа
+            logger.error(
+                "error_processing_telegram_message_internal",
+                message_id=message.id if message else None,
+                chat_id=message.chat.id if message and message.chat else None,
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True
+            )
+            return
+        except Exception as e:
+            # Неожиданные ошибки при обработке сообщения
+            logger.error(
+                "error_processing_telegram_message_unexpected",
+                message_id=message.id if message else None,
+                chat_id=message.chat.id if message and message.chat else None,
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True
+            )
             return
     
     async def _process_media_group(self, messages: List, client=None, link_id: Optional[int] = None) -> None:
@@ -1522,7 +1561,8 @@ class MessageProcessor:
                                             await asyncio.sleep(retry_delay)
                                             retry_delay *= 2
                                             continue
-                                except:
+                                except Exception as parse_error:
+                                    logger.warning("failed_to_parse_attachment_response", error=str(parse_error), attempt=attempt+1)
                                     pass
                             if attempt == max_retries - 1:
                                 raise

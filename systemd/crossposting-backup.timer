@@ -1,0 +1,13 @@
+[Unit]
+Description=Crossposting Service - Database Backup Timer
+Requires=crossposting-backup.service
+
+[Timer]
+# Запускать бэкап каждый день в 3:00 ночи
+OnCalendar=daily
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+

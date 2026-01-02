@@ -9,6 +9,7 @@ from app.utils.retry import retry_with_backoff
 from app.utils.exceptions import APIError
 from app.utils.rate_limiter import max_api_limiter
 from app.utils.chat_id_converter import convert_chat_id
+from app.utils.cache import get_cache, set_cache
 
 logger = get_logger(__name__)
 
@@ -43,6 +44,13 @@ class MaxAPIClient:
         Raises:
             APIError: При ошибке API
         """
+        # Проверяем кэш
+        cache_key = "max_api:bot_info"
+        cached = await get_cache(cache_key)
+        if cached:
+            logger.debug("bot_info_from_cache")
+            return cached
+        
         try:
             await max_api_limiter.wait_if_needed("max_api_bot_info")
             response = await retry_with_backoff(
@@ -50,7 +58,13 @@ class MaxAPIClient:
                 "/me"
             )
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+            
+            # Сохраняем в кэш на 30 минут
+            await set_cache(cache_key, result, ttl=1800)
+            logger.debug("bot_info_cached", ttl=1800)
+            
+            return result
         except httpx.HTTPStatusError as e:
             logger.error("failed_to_get_bot_info", status_code=e.response.status_code, error=str(e))
             raise APIError(
@@ -1248,6 +1262,13 @@ class MaxAPIClient:
         Returns:
             Информация о чате
         """
+        # Проверяем кэш
+        cache_key = f"max_api:chat_info:{chat_id}"
+        cached = await get_cache(cache_key)
+        if cached:
+            logger.debug("chat_info_from_cache", chat_id=chat_id)
+            return cached
+        
         try:
             await max_api_limiter.wait_if_needed(f"max_api_{chat_id}")
             # Пробуем сначала числовой ID, если передан строковый
@@ -1264,7 +1285,13 @@ class MaxAPIClient:
                     f"/chats/{chat_id}"
                 )
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+            
+            # Сохраняем в кэш на 1 час
+            await set_cache(cache_key, result, ttl=3600)
+            logger.debug("chat_info_cached", chat_id=chat_id, ttl=3600)
+            
+            return result
         except httpx.HTTPStatusError as e:
             logger.error("failed_to_get_chat", chat_id=chat_id, status_code=e.response.status_code, error=str(e))
             raise APIError(
@@ -1286,6 +1313,13 @@ class MaxAPIClient:
         Returns:
             Список чатов/каналов
         """
+        # Проверяем кэш
+        cache_key = "max_api:available_chats"
+        cached = await get_cache(cache_key)
+        if cached:
+            logger.debug("available_chats_from_cache")
+            return cached
+        
         try:
             await max_api_limiter.wait_if_needed("max_api_chats_list")
             response = await retry_with_backoff(
@@ -1294,7 +1328,13 @@ class MaxAPIClient:
             )
             response.raise_for_status()
             result = response.json()
-            return result.get('chats', [])
+            chats = result.get('chats', [])
+            
+            # Сохраняем в кэш на 1 час
+            await set_cache(cache_key, chats, ttl=3600)
+            logger.debug("available_chats_cached", ttl=3600)
+            
+            return chats
         except httpx.HTTPStatusError as e:
             logger.error("failed_to_get_chats", status_code=e.response.status_code, error=str(e))
             raise APIError(

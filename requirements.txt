@@ -23,7 +23,7 @@ python-dotenv==1.0.0
 structlog==23.2.0
 
 # Task Queue (optional)
-celery==5.3.4
+# celery==5.3.4  # Не используется, закомментировано
 
 # Testing
 pytest==7.4.3

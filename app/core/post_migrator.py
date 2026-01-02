@@ -15,6 +15,9 @@ from app.core.message_processor import MessageProcessor
 from app.core.migration_queue import migration_queue
 from app.utils.logger import get_logger
 from app.utils.enums import MessageStatus
+from app.utils.exceptions import APIError, DatabaseError, MediaProcessingError
+import httpx
+import subprocess
 from config.database import async_session_maker
 from config.settings import settings
 
@@ -273,10 +276,38 @@ class PostMigrator:
                             stats["success"] += 1  # Считаем как 1 успешный пост
                             logger.info("media_group_migrated", group_size=len(group), link_id=link_id)
                             
+                        except (APIError, httpx.HTTPStatusError, httpx.RequestError, asyncio.TimeoutError) as e:
+                            stats["failed"] += 1
+                            logger.error(
+                                "media_group_migration_failed_api",
+                                error=str(e),
+                                error_type=type(e).__name__,
+                                group_size=len(group),
+                                link_id=link_id,
+                                exc_info=True
+                            )
+                            continue
+                        except (DatabaseError, MediaProcessingError) as e:
+                            stats["failed"] += 1
+                            logger.error(
+                                "media_group_migration_failed_internal",
+                                error=str(e),
+                                error_type=type(e).__name__,
+                                group_size=len(group),
+                                link_id=link_id,
+                                exc_info=True
+                            )
+                            continue
                         except Exception as e:
-                            stats["failed"] += 1  # Считаем как 1 неудачный пост
-                            logger.error("media_group_migration_failed", error=str(e), group_size=len(group), link_id=link_id, exc_info=True)
-                            # Продолжаем обработку следующих постов даже при ошибке
+                            stats["failed"] += 1
+                            logger.error(
+                                "media_group_migration_failed_unexpected",
+                                error=str(e),
+                                error_type=type(e).__name__,
+                                group_size=len(group),
+                                link_id=link_id,
+                                exc_info=True
+                            )
                             continue
                     
                     elif item["type"] == "standalone":
@@ -355,10 +386,41 @@ class PostMigrator:
                                 stats["skipped_duplicate"] += 1
                                 logger.info("post_skipped", message_id=msg.id, link_id=link_id, processed=processed_count, total=len(items_to_process_sorted))
                             
+                    except (APIError, httpx.HTTPStatusError, httpx.RequestError, asyncio.TimeoutError) as e:
+                        stats["failed"] += 1
+                        logger.error(
+                            "post_migration_failed_api",
+                            message_id=msg.id,
+                            error=str(e),
+                            error_type=type(e).__name__,
+                            exc_info=True,
+                            processed=processed_count,
+                            total=len(items_to_process_sorted)
+                        )
+                        continue
+                    except (DatabaseError, MediaProcessingError) as e:
+                        stats["failed"] += 1
+                        logger.error(
+                            "post_migration_failed_internal",
+                            message_id=msg.id,
+                            error=str(e),
+                            error_type=type(e).__name__,
+                            exc_info=True,
+                            processed=processed_count,
+                            total=len(items_to_process_sorted)
+                        )
+                        continue
                     except Exception as e:
                         stats["failed"] += 1
-                        logger.error("post_migration_failed", message_id=msg.id, error=str(e), exc_info=True, processed=processed_count, total=len(items_to_process_sorted))
-                        # Продолжаем обработку следующих постов даже при ошибке
+                        logger.error(
+                            "post_migration_failed_unexpected",
+                            message_id=msg.id,
+                            error=str(e),
+                            error_type=type(e).__name__,
+                            exc_info=True,
+                            processed=processed_count,
+                            total=len(items_to_process_sorted)
+                        )
                         continue
                     
                     # Периодические обновления прогресса
@@ -369,23 +431,54 @@ class PostMigrator:
                         await progress_callback(processed_count, stats["success"], stats["skipped"], stats["failed"])
                         last_progress_update = datetime.utcnow()
                 
-                except Exception as item_error:
-                    # КРИТИЧНО: Обрабатываем любые ошибки при обработке элемента (поста или медиа-группы)
-                    # Логируем ошибку, но продолжаем миграцию со следующего поста
-                    processed_count += 1  # Увеличиваем счетчик, чтобы не застрять на одном посте
+                except (APIError, httpx.HTTPStatusError, httpx.RequestError, asyncio.TimeoutError) as item_error:
+                    # Ошибки API - логируем и продолжаем
+                    processed_count += 1
                     stats["failed"] += 1
                     logger.error(
-                        "item_migration_failed",
+                        "item_migration_failed_api_error",
                         item_type=item.get("type", "unknown"),
                         message_id=item.get("message", {}).id if item.get("type") == "standalone" else None,
                         group_size=len(item.get("group", [])) if item.get("type") == "media_group" else None,
-                                       link_id=link_id,
+                        link_id=link_id,
                         error=str(item_error),
                         processed=processed_count,
                         total=len(items_to_process_sorted),
                         exc_info=True
                     )
-                    # Продолжаем обработку следующих постов
+                    continue
+                except (DatabaseError, MediaProcessingError) as item_error:
+                    # Ошибки БД или обработки медиа - логируем и продолжаем
+                    processed_count += 1
+                    stats["failed"] += 1
+                    logger.error(
+                        "item_migration_failed_internal_error",
+                        item_type=item.get("type", "unknown"),
+                        message_id=item.get("message", {}).id if item.get("type") == "standalone" else None,
+                        group_size=len(item.get("group", [])) if item.get("type") == "media_group" else None,
+                        link_id=link_id,
+                        error=str(item_error),
+                        processed=processed_count,
+                        total=len(items_to_process_sorted),
+                        exc_info=True
+                    )
+                    continue
+                except Exception as item_error:
+                    # Неожиданные ошибки - логируем с полной информацией и продолжаем
+                    processed_count += 1
+                    stats["failed"] += 1
+                    logger.error(
+                        "item_migration_failed_unexpected_error",
+                        item_type=item.get("type", "unknown"),
+                        message_id=item.get("message", {}).id if item.get("type") == "standalone" else None,
+                        group_size=len(item.get("group", [])) if item.get("type") == "media_group" else None,
+                        link_id=link_id,
+                        error=str(item_error),
+                        error_type=type(item_error).__name__,
+                        processed=processed_count,
+                        total=len(items_to_process_sorted),
+                        exc_info=True
+                    )
                     continue
             
             logger.info(
@@ -400,10 +493,24 @@ class PostMigrator:
                 processed=processed_count
             )
             
+        except (DatabaseError, ConnectionError) as e:
+            # Критические ошибки БД или подключения
+            logger.error(
+                "migration_critical_error_db",
+                link_id=link_id,
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True
+            )
         except Exception as e:
-            # КРИТИЧНО: Обрабатываем критические ошибки (например, проблемы с подключением к БД или Pyrogram)
-            # Такие ошибки логируем, но не прерываем миграцию - она уже обработала все посты, которые смогла
-            logger.error("migration_critical_error", link_id=link_id, error=str(e), exc_info=True)
+            # Неожиданные критические ошибки
+            logger.error(
+                "migration_critical_error_unexpected",
+                link_id=link_id,
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True
+            )
             # Устанавливаем duration даже при ошибке
             end_time = datetime.utcnow()
             stats["duration"] = (end_time - start_time).total_seconds()
@@ -520,22 +627,41 @@ class PostMigrator:
                                             link_id=link_id,
                                             error=result.stderr
                                         )
+                                except (OSError, subprocess.SubprocessError) as e:
+                                    logger.error(
+                                        "failed_to_restart_mtproto_receiver_subprocess",
+                                        link_id=link_id,
+                                        error=str(e),
+                                        error_type=type(e).__name__,
+                                        exc_info=True
+                                    )
                                 except Exception as e:
                                     logger.error(
-                                        "failed_to_restart_mtproto_receiver",
-                                               link_id=link_id,
-                                               error=str(e),
+                                        "failed_to_restart_mtproto_receiver_unexpected",
+                                        link_id=link_id,
+                                        error=str(e),
+                                        error_type=type(e).__name__,
                                         exc_info=True
                                     )
                             else:
                                 # Оставляем отключенным, если был отключен до миграции
                                 logger.info("crossposting_remains_disabled_after_migration", link_id=link_id)
-                except Exception as e:
-                    # Логируем ошибку в основном блоке finally
+                except (DatabaseError, ConnectionError) as e:
+                    # Ошибки БД в finally блоке
                     logger.error(
-                        "error_in_migration_finally_block",
-                                             link_id=link_id,
+                        "error_in_migration_finally_block_db",
+                        link_id=link_id,
                         error=str(e),
+                        error_type=type(e).__name__,
+                        exc_info=True
+                    )
+                except Exception as e:
+                    # Неожиданные ошибки в finally блоке
+                    logger.error(
+                        "error_in_migration_finally_block_unexpected",
+                        link_id=link_id,
+                        error=str(e),
+                        error_type=type(e).__name__,
                         exc_info=True
                     )
                     # Пытаемся хотя бы включить связь, даже если остальное не удалось
@@ -550,8 +676,22 @@ class PostMigrator:
                                     link.is_enabled = True
                                     await emergency_session.commit()
                                     logger.info("link_enabled_in_emergency_finally", link_id=link_id)
+                        except (DatabaseError, ConnectionError) as emergency_error:
+                            logger.error(
+                                "failed_to_enable_link_in_emergency_db",
+                                link_id=link_id,
+                                error=str(emergency_error),
+                                error_type=type(emergency_error).__name__,
+                                exc_info=True
+                            )
                         except Exception as emergency_error:
-                            logger.error("failed_to_enable_link_in_emergency", link_id=link_id, error=str(emergency_error))
+                            logger.error(
+                                "failed_to_enable_link_in_emergency_unexpected",
+                                link_id=link_id,
+                                error=str(emergency_error),
+                                error_type=type(emergency_error).__name__,
+                                exc_info=True
+                            )
             else:
                 # КРИТИЧНО: Если link_was_enabled is None, значит миграция не дошла до установки этого значения
                 # Это может произойти при очень раннем прерывании. Пытаемся включить связь на всякий случай
@@ -735,8 +875,32 @@ class PostMigrator:
                 logger.warning("post_migration_failed_no_success", message_id=message.id, link_id=link_id)
                 return False
                 
+        except (APIError, httpx.HTTPStatusError, httpx.RequestError, asyncio.TimeoutError) as e:
+            logger.error(
+                "failed_to_process_single_post_api",
+                message_id=message.id,
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True
+            )
+            return False
+        except (DatabaseError, MediaProcessingError) as e:
+            logger.error(
+                "failed_to_process_single_post_internal",
+                message_id=message.id,
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True
+            )
+            return False
         except Exception as e:
-            logger.error("failed_to_process_single_post", message_id=message.id, error=str(e), exc_info=True)
+            logger.error(
+                "failed_to_process_single_post_unexpected",
+                message_id=message.id,
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True
+            )
             return False
     
     async def _convert_message(self, message: PyrogramMessage, client=None) -> Dict[str, Any]:

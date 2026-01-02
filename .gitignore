@@ -48,6 +48,7 @@ logs/
 *.session
 *.session-journal
 phone_code_hash.txt
+session_string.txt
 
 # Testing
 .pytest_cache/
