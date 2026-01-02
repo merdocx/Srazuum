@@ -58,24 +58,37 @@ async def download_and_store_media(
             media_obj = message.voice
         elif file_type == "sticker" and message.sticker:
             media_obj = message.sticker
+        elif file_type == "video_note" and message.video_note:
+            media_obj = message.video_note
         
         if not media_obj:
             return None, None
         
         # Генерируем уникальное имя файла
         file_id = getattr(media_obj, 'file_id', str(uuid.uuid4()))
-        file_ext = getattr(media_obj, 'file_name', '').split('.')[-1] if hasattr(media_obj, 'file_name') else 'jpg'
-        if not file_ext or file_ext == file_id:
-            # Определяем расширение по типу
-            ext_map = {
-                "photo": "jpg",
-                "video": "mp4",
-                "animation": "gif",  # GIF файлы
-                "document": "bin",
-                "audio": "mp3",
-                "voice": "ogg",
-                "sticker": "webp"
-            }
+        
+        # Определяем расширение по типу (приоритет - тип файла, а не file_name)
+        ext_map = {
+            "photo": "jpg",
+            "video": "mp4",
+            "animation": "gif",  # GIF файлы
+            "document": "bin",
+            "audio": "mp3",
+            "voice": "ogg",
+            "sticker": "webp",
+            "video_note": "mp4"  # Video note - это MP4 файл
+        }
+        
+        # Сначала пытаемся определить расширение из file_name, если оно есть и валидно
+        file_ext = None
+        if hasattr(media_obj, 'file_name') and media_obj.file_name:
+            file_ext = media_obj.file_name.split('.')[-1].lower()
+            # Проверяем, что расширение валидно (не пустое и не равно file_id)
+            if not file_ext or file_ext == file_id or file_ext not in ['jpg', 'jpeg', 'png', 'gif', 'mp4', 'mp3', 'ogg', 'webp', 'bin', 'pdf', 'doc', 'docx', 'txt']:
+                file_ext = None
+        
+        # Если не удалось определить из file_name, используем расширение по типу
+        if not file_ext:
             file_ext = ext_map.get(file_type, "bin")
         
         # Создаем уникальное имя файла
@@ -223,6 +236,9 @@ async def get_media_url(
             return public_url
         elif message.sticker:
             public_url, _ = await download_and_store_media(client, message, "sticker")
+            return public_url
+        elif message.video_note:
+            public_url, _ = await download_and_store_media(client, message, "video_note")
             return public_url
         
         return None

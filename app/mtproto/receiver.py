@@ -125,7 +125,8 @@ class MTProtoReceiver:
         
         try:
             # Пропускаем только полностью пустые сообщения (без текста, caption и медиа)
-            if not message.text and not message.caption and not (message.photo or message.video or message.document or message.audio or message.voice or message.sticker):
+            # ВАЖНО: Добавляем message.animation и message.video_note для поддержки GIF и кружочков
+            if not message.text and not message.caption and not (message.photo or message.video or message.document or message.audio or message.voice or message.sticker or message.animation or message.video_note):
                 logger.debug(f"Пропущено служебное сообщение из канала {message.chat.id}")
                 return
             

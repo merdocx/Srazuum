@@ -286,7 +286,7 @@ class PostMigrator:
                     
                     # Пропускаем пустые сообщения (без текста, caption и медиа)
                     # ВАЖНО: Добавляем msg.animation для поддержки GIF
-                    has_content = bool(msg.text or msg.caption or msg.photo or msg.video or msg.document or msg.audio or msg.voice or msg.sticker or msg.animation)
+                    has_content = bool(msg.text or msg.caption or msg.photo or msg.video or msg.document or msg.audio or msg.voice or msg.sticker or msg.animation or msg.video_note)
                     
                     logger.info(
                         "processing_post",
@@ -752,7 +752,8 @@ class PostMigrator:
         """
         from app.utils.media_handler import download_and_store_media
         
-        message_data = {
+        try:
+            message_data = {
             "message_id": message.id,
             "date": message.date,
             "text": message.text or "",
@@ -764,164 +765,213 @@ class PostMigrator:
             "media_group_id": getattr(message, 'media_group_id', None)
         }
         
-        # Определение типа сообщения и загрузка медиа
-        if message.photo:
-            message_data["type"] = "photo"
-            message_data["photo"] = message.photo
-            # Обрабатываем форматирование caption, если есть
-            if message.caption_entities:
-                from app.utils.text_formatter import apply_formatting
-                formatted_caption, caption_parse_mode = apply_formatting(
-                    message.caption or "",
-                    message.caption_entities
-                )
-                message_data["caption"] = formatted_caption
-                message_data["caption_parse_mode"] = caption_parse_mode
-            else:
-                message_data["caption"] = message.caption
-            
-            # Скачиваем фото если есть client
-            if client:
-                try:
-                    photo_url, local_file_path = await download_and_store_media(client, message, "photo")
-                    if photo_url:
-                        message_data["photo_url"] = photo_url
-                        message_data["local_file_path"] = local_file_path
-                    else:
+            # Определение типа сообщения и загрузка медиа
+            if message.photo:
+                message_data["type"] = "photo"
+                message_data["photo"] = message.photo
+                # Обрабатываем форматирование caption, если есть
+                if message.caption_entities:
+                    from app.utils.text_formatter import apply_formatting
+                    formatted_caption, caption_parse_mode = apply_formatting(
+                        message.caption or "",
+                        message.caption_entities
+                    )
+                    message_data["caption"] = formatted_caption
+                    message_data["caption_parse_mode"] = caption_parse_mode
+                else:
+                    message_data["caption"] = message.caption
+                
+                # Скачиваем фото если есть client
+                if client:
+                    try:
+                        photo_url, local_file_path = await download_and_store_media(client, message, "photo")
+                        if photo_url:
+                            message_data["photo_url"] = photo_url
+                            message_data["local_file_path"] = local_file_path
+                        else:
+                            message_data["photo_url"] = None
+                    except Exception as e:
+                        logger.error("failed_to_download_photo_in_migration", message_id=message.id, error=str(e), exc_info=True)
                         message_data["photo_url"] = None
-                except Exception as e:
-                    logger.error("failed_to_download_photo_in_migration", message_id=message.id, error=str(e), exc_info=True)
-                    message_data["photo_url"] = None
-        elif message.video:
-            message_data["type"] = "video"
-            message_data["video"] = message.video
-            # Обрабатываем форматирование caption, если есть
-            if message.caption_entities:
-                from app.utils.text_formatter import apply_formatting
-                formatted_caption, caption_parse_mode = apply_formatting(
-                    message.caption or "",
-                    message.caption_entities
-                )
-                message_data["caption"] = formatted_caption
-                message_data["parse_mode"] = caption_parse_mode
-            else:
-                message_data["caption"] = message.caption
-            
-            # Скачиваем видео если есть client
-            if client:
-                try:
-                    video_url, local_file_path = await download_and_store_media(client, message, "video")
-                    if video_url and local_file_path:
-                        message_data["video_url"] = video_url
-                        message_data["local_file_path"] = local_file_path
-                    else:
+            elif message.video:
+                message_data["type"] = "video"
+                message_data["video"] = message.video
+                # Обрабатываем форматирование caption, если есть
+                if message.caption_entities:
+                    from app.utils.text_formatter import apply_formatting
+                    formatted_caption, caption_parse_mode = apply_formatting(
+                        message.caption or "",
+                        message.caption_entities
+                    )
+                    message_data["caption"] = formatted_caption
+                    message_data["parse_mode"] = caption_parse_mode
+                else:
+                    message_data["caption"] = message.caption
+                
+                # Скачиваем видео если есть client
+                if client:
+                    try:
+                        video_url, local_file_path = await download_and_store_media(client, message, "video")
+                        if video_url and local_file_path:
+                            message_data["video_url"] = video_url
+                            message_data["local_file_path"] = local_file_path
+                        else:
+                            message_data["video_url"] = None
+                            message_data["local_file_path"] = None
+                    except Exception as e:
+                        logger.error("failed_to_download_video_in_migration", message_id=message.id, error=str(e), exc_info=True)
                         message_data["video_url"] = None
                         message_data["local_file_path"] = None
-                except Exception as e:
-                    logger.error("failed_to_download_video_in_migration", message_id=message.id, error=str(e), exc_info=True)
-                    message_data["video_url"] = None
-                    message_data["local_file_path"] = None
-        elif message.animation:
-            # Обработка GIF (message.animation)
-            # В Pyrogram animation похож на video, но это специальный тип для анимированных GIF
-            message_data["type"] = "video"  # Обрабатываем animation как video для MAX API
-            message_data["video"] = message.animation  # Используем video для совместимости
-            # Обрабатываем форматирование caption, если есть
-            if message.caption_entities:
-                from app.utils.text_formatter import apply_formatting
-                formatted_caption, caption_parse_mode = apply_formatting(
-                    message.caption or "",
-                    message.caption_entities
-                )
-                message_data["caption"] = formatted_caption
-                message_data["parse_mode"] = caption_parse_mode
-            else:
-                message_data["caption"] = message.caption
-            
-            # Скачиваем animation (GIF) если есть client
-            if client:
-                try:
-                    animation_url, local_file_path = await download_and_store_media(client, message, "animation")
-                    if animation_url and local_file_path:
-                        message_data["video_url"] = animation_url  # Используем video_url для совместимости с send_video
-                        message_data["local_file_path"] = local_file_path
-                    else:
+            elif message.animation:
+                # Обработка GIF (message.animation)
+                # В Pyrogram animation похож на video, но это специальный тип для анимированных GIF
+                message_data["type"] = "video"  # Обрабатываем animation как video для MAX API
+                message_data["video"] = message.animation  # Используем video для совместимости
+                # Обрабатываем форматирование caption, если есть
+                if message.caption_entities:
+                    from app.utils.text_formatter import apply_formatting
+                    formatted_caption, caption_parse_mode = apply_formatting(
+                        message.caption or "",
+                        message.caption_entities
+                    )
+                    message_data["caption"] = formatted_caption
+                    message_data["parse_mode"] = caption_parse_mode
+                else:
+                    message_data["caption"] = message.caption
+                
+                # Скачиваем animation (GIF) если есть client
+                if client:
+                    try:
+                        animation_url, local_file_path = await download_and_store_media(client, message, "animation")
+                        if animation_url and local_file_path:
+                            message_data["video_url"] = animation_url  # Используем video_url для совместимости с send_video
+                            message_data["local_file_path"] = local_file_path
+                        else:
+                            message_data["video_url"] = None
+                            message_data["local_file_path"] = None
+                    except Exception as e:
+                        logger.error("failed_to_download_animation_in_migration", message_id=message.id, error=str(e), exc_info=True)
                         message_data["video_url"] = None
                         message_data["local_file_path"] = None
-                except Exception as e:
-                    logger.error("failed_to_download_animation_in_migration", message_id=message.id, error=str(e), exc_info=True)
+                else:
                     message_data["video_url"] = None
                     message_data["local_file_path"] = None
-            else:
-                message_data["video_url"] = None
-                message_data["local_file_path"] = None
-        elif message.document:
-            message_data["type"] = "document"
-            # Обрабатываем форматирование caption, если есть
-            if message.caption_entities:
-                from app.utils.text_formatter import apply_formatting
-                formatted_caption, caption_parse_mode = apply_formatting(
-                    message.caption or "",
-                    message.caption_entities
-                )
-                message_data["caption"] = formatted_caption
-                message_data["parse_mode"] = caption_parse_mode
-            else:
-                message_data["caption"] = message.caption
-            
-            # Скачиваем документ если есть client
-            if client:
-                try:
-                    document_url, local_file_path = await download_and_store_media(client, message, "document")
-                    if document_url and local_file_path:
-                        message_data["document_url"] = document_url
-                        message_data["local_file_path"] = local_file_path
-                    else:
+            elif message.document:
+                message_data["type"] = "document"
+                # Обрабатываем форматирование caption, если есть
+                if message.caption_entities:
+                    from app.utils.text_formatter import apply_formatting
+                    formatted_caption, caption_parse_mode = apply_formatting(
+                        message.caption or "",
+                        message.caption_entities
+                    )
+                    message_data["caption"] = formatted_caption
+                    message_data["parse_mode"] = caption_parse_mode
+                else:
+                    message_data["caption"] = message.caption
+                
+                # Скачиваем документ если есть client
+                if client:
+                    try:
+                        document_url, local_file_path = await download_and_store_media(client, message, "document")
+                        if document_url and local_file_path:
+                            message_data["document_url"] = document_url
+                            message_data["local_file_path"] = local_file_path
+                        else:
+                            message_data["document_url"] = None
+                            message_data["local_file_path"] = None
+                    except Exception as e:
+                        logger.error("failed_to_download_document_in_migration", message_id=message.id, error=str(e), exc_info=True)
                         message_data["document_url"] = None
                         message_data["local_file_path"] = None
-                except Exception as e:
-                    logger.error("failed_to_download_document_in_migration", message_id=message.id, error=str(e), exc_info=True)
+                else:
                     message_data["document_url"] = None
                     message_data["local_file_path"] = None
-            else:
-                message_data["document_url"] = None
-                message_data["local_file_path"] = None
-        elif message.audio:
-            message_data["type"] = "audio"
-            message_data["caption"] = message.caption
-        elif message.voice:
-            message_data["type"] = "voice"
-        elif message.sticker:
-            message_data["type"] = "sticker"
-            
-            # Скачиваем стикер если есть client
-            if client:
-                try:
-                    sticker_url, local_file_path = await download_and_store_media(client, message, "sticker")
-                    if sticker_url and local_file_path:
-                        message_data["sticker_url"] = sticker_url
-                        message_data["local_file_path"] = local_file_path
-                    else:
+            elif message.audio:
+                message_data["type"] = "audio"
+                message_data["caption"] = message.caption
+            elif message.voice:
+                message_data["type"] = "voice"
+            elif message.video_note:
+                # Обработка video note (кружочки)
+                # Video note - это обычное MP4 видео в квадратном формате, обрабатываем как video
+                message_data["type"] = "video"
+                message_data["video"] = message.video_note
+                # Обрабатываем форматирование caption, если есть
+                if message.caption_entities:
+                    from app.utils.text_formatter import apply_formatting
+                    formatted_caption, caption_parse_mode = apply_formatting(
+                        message.caption or "",
+                        message.caption_entities
+                    )
+                    message_data["caption"] = formatted_caption
+                    message_data["parse_mode"] = caption_parse_mode
+                else:
+                    message_data["caption"] = message.caption
+                
+                # Скачиваем video note если есть client
+                if client:
+                    try:
+                        video_url, local_file_path = await download_and_store_media(client, message, "video_note")
+                        if video_url and local_file_path:
+                            message_data["video_url"] = video_url
+                            message_data["local_file_path"] = local_file_path
+                        else:
+                            message_data["video_url"] = None
+                            message_data["local_file_path"] = None
+                    except Exception as e:
+                        logger.error("failed_to_download_video_note_in_migration", message_id=message.id, error=str(e), exc_info=True)
+                        message_data["video_url"] = None
+                        message_data["local_file_path"] = None
+                else:
+                    message_data["video_url"] = None
+                    message_data["local_file_path"] = None
+            elif message.sticker:
+                message_data["type"] = "sticker"
+                
+                # Скачиваем стикер если есть client
+                if client:
+                    try:
+                        sticker_url, local_file_path = await download_and_store_media(client, message, "sticker")
+                        if sticker_url and local_file_path:
+                            message_data["sticker_url"] = sticker_url
+                            message_data["local_file_path"] = local_file_path
+                        else:
+                            message_data["sticker_url"] = None
+                            message_data["local_file_path"] = None
+                    except Exception as e:
+                        logger.error("failed_to_download_sticker_in_migration", message_id=message.id, error=str(e), exc_info=True)
                         message_data["sticker_url"] = None
                         message_data["local_file_path"] = None
-                except Exception as e:
-                    logger.error("failed_to_download_sticker_in_migration", message_id=message.id, error=str(e), exc_info=True)
+                else:
                     message_data["sticker_url"] = None
                     message_data["local_file_path"] = None
-            else:
-                message_data["sticker_url"] = None
-                message_data["local_file_path"] = None
-        
-        # Обработка форматирования текста (для текстовых сообщений)
-        # ВАЖНО: Добавляем message.animation в проверку
-        if message.entities and not message.photo and not message.video and not message.animation:
-            from app.utils.text_formatter import apply_formatting
-            formatted_text, parse_mode = apply_formatting(
-                message_data.get("text", ""),
-                message.entities
-            )
-            message_data["text"] = formatted_text
-            message_data["parse_mode"] = parse_mode
-        
-        return message_data
+            
+                # Обработка форматирования текста (для текстовых сообщений)
+                # ВАЖНО: Добавляем message.animation и message.video_note в проверку
+                if message.entities and not message.photo and not message.video and not message.animation and not message.video_note:
+                    from app.utils.text_formatter import apply_formatting
+                    formatted_text, parse_mode = apply_formatting(
+                        message_data.get("text", ""),
+                        message.entities
+                    )
+                    message_data["text"] = formatted_text
+                    message_data["parse_mode"] = parse_mode
+                
+            return message_data
+        except Exception as e:
+            # КРИТИЧНО: Обрабатываем любые ошибки при конвертации сообщения
+            # Возвращаем базовую структуру, чтобы миграция могла продолжиться
+            logger.error("failed_to_convert_message", message_id=message.id, error=str(e), exc_info=True)
+            return {
+                "message_id": message.id,
+                "date": message.date,
+                "text": message.text or message.caption or "",
+                "caption": message.caption or "",
+                "type": "text",
+                "photo": None,
+                "video": None,
+                "document": None,
+                "media_group_id": getattr(message, 'media_group_id', None)
+            }
 

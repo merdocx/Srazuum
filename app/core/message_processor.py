@@ -661,279 +661,329 @@ class MessageProcessor:
             message: Сообщение из Pyrogram
             client: Pyrogram клиент для загрузки медиа (опционально)
         """
-        from pyrogram.types import Message
-        from app.utils.media_handler import get_media_url, download_and_store_media
-        
-        # Пропускаем только полностью пустые сообщения (без текста, caption и медиа)
-        # ВАЖНО: Добавляем message.animation для поддержки GIF
-        if not message.text and not message.caption and not (message.photo or message.video or message.document or message.audio or message.voice or message.sticker or message.animation):
-            logger.debug("skipping_empty_message", chat_id=message.chat.id if message.chat else None)
-            return
-        
-        # Получаем ID канала Telegram
-        telegram_chat_id = message.chat.id if message.chat else None
-        if not telegram_chat_id:
-                        return
-        
-        # Если сообщение входит в медиа-группу, обрабатываем через handler
-        if hasattr(message, 'media_group_id') and message.media_group_id is not None:
-            result = await self.media_group_handler.add_message(
-                message,
-                self._process_media_group,
-                client=client
-            )
-            # Если сообщение добавлено в группу, обработка будет позже
-            if result is None:
+        try:
+            from pyrogram.types import Message
+            from app.utils.media_handler import get_media_url, download_and_store_media
+            
+            # Пропускаем только полностью пустые сообщения (без текста, caption и медиа)
+            # ВАЖНО: Добавляем message.animation и message.video_note для поддержки GIF и кружочков
+            if not message.text and not message.caption and not (message.photo or message.video or message.document or message.audio or message.voice or message.sticker or message.animation or message.video_note):
+                logger.debug("skipping_empty_message", chat_id=message.chat.id if message.chat else None)
                 return
-            # Если группа обработана сразу (не должно быть), продолжаем
-        
-        # Подготовка данных сообщения
-        message_data = {
-            "type": "text",  # Используем строковое значение напрямую
-            "text": message.text or message.caption or "",
-        }
-        
-        # Определение типа сообщения и получение URL медиа
-        if message.photo:
-            logger.info("processing_photo_message", chat_id=message.chat.id if message.chat else None)
-            message_data["type"] = "photo"
-            # Обрабатываем форматирование caption, если есть
-            if message.caption_entities:
-                from app.utils.text_formatter import apply_formatting
-                formatted_caption, caption_parse_mode = apply_formatting(
-                    message.caption or "",
-                    message.caption_entities
+            
+            # Получаем ID канала Telegram
+            telegram_chat_id = message.chat.id if message.chat else None
+            if not telegram_chat_id:
+                            return
+            
+            # Если сообщение входит в медиа-группу, обрабатываем через handler
+            if hasattr(message, 'media_group_id') and message.media_group_id is not None:
+                result = await self.media_group_handler.add_message(
+                    message,
+                    self._process_media_group,
+                    client=client
                 )
-                message_data["caption"] = formatted_caption
-                message_data["caption_parse_mode"] = caption_parse_mode
-            else:
-                message_data["caption"] = message.caption
-            if client:
-                try:
-                    # Скачиваем фото и получаем публичный URL и локальный путь
-                    logger.info("downloading_photo_start", chat_id=message.chat.id if message.chat else None)
-                    photo_url, local_file_path = await download_and_store_media(client, message, "photo")
-                    if photo_url:
-                        logger.info("photo_downloaded", photo_url=photo_url, chat_id=message.chat.id if message.chat else None)
-                        message_data["photo_url"] = photo_url
-                        message_data["local_file_path"] = local_file_path
-                    else:
-                        logger.warning("photo_url_is_none", chat_id=message.chat.id if message.chat else None)
+                # Если сообщение добавлено в группу, обработка будет позже
+                if result is None:
+                    return
+                # Если группа обработана сразу (не должно быть), продолжаем
+            
+            # Подготовка данных сообщения
+            message_data = {
+                "type": "text",  # Используем строковое значение напрямую
+                "text": message.text or message.caption or "",
+            }
+            
+            # Определение типа сообщения и получение URL медиа
+            if message.photo:
+                logger.info("processing_photo_message", chat_id=message.chat.id if message.chat else None)
+                message_data["type"] = "photo"
+                # Обрабатываем форматирование caption, если есть
+                if message.caption_entities:
+                    from app.utils.text_formatter import apply_formatting
+                    formatted_caption, caption_parse_mode = apply_formatting(
+                        message.caption or "",
+                        message.caption_entities
+                    )
+                    message_data["caption"] = formatted_caption
+                    message_data["caption_parse_mode"] = caption_parse_mode
+                else:
+                    message_data["caption"] = message.caption
+                if client:
+                    try:
+                        # Скачиваем фото и получаем публичный URL и локальный путь
+                        logger.info("downloading_photo_start", chat_id=message.chat.id if message.chat else None)
+                        photo_url, local_file_path = await download_and_store_media(client, message, "photo")
+                        if photo_url:
+                            logger.info("photo_downloaded", photo_url=photo_url, chat_id=message.chat.id if message.chat else None)
+                            message_data["photo_url"] = photo_url
+                            message_data["local_file_path"] = local_file_path
+                        else:
+                            logger.warning("photo_url_is_none", chat_id=message.chat.id if message.chat else None)
+                            message_data["photo_url"] = None
+                    except Exception as e:
+                        logger.error("failed_to_get_photo_url", error=str(e), exc_info=True)
                         message_data["photo_url"] = None
-                except Exception as e:
-                    logger.error("failed_to_get_photo_url", error=str(e), exc_info=True)
+                else:
+                    logger.warning("no_client_for_photo_download", chat_id=message.chat.id if message.chat else None)
                     message_data["photo_url"] = None
-            else:
-                logger.warning("no_client_for_photo_download", chat_id=message.chat.id if message.chat else None)
-                message_data["photo_url"] = None
-        elif message.video:
-            logger.info("processing_video_message", chat_id=message.chat.id if message.chat else None)
-            message_data["type"] = "video"
-            # Обрабатываем форматирование caption, если есть
-            if message.caption_entities:
-                from app.utils.text_formatter import apply_formatting
-                formatted_caption, caption_parse_mode = apply_formatting(
-                    message.caption or "",
-                    message.caption_entities
-                )
-                message_data["caption"] = formatted_caption
-                message_data["parse_mode"] = caption_parse_mode
-            else:
-                message_data["caption"] = message.caption
-            if client:
-                try:
-                    # Скачиваем видео и получаем публичный URL и локальный путь
-                    logger.info("downloading_video_start", chat_id=message.chat.id if message.chat else None)
-                    video_url, local_file_path = await download_and_store_media(client, message, "video")
-                    if video_url and local_file_path:
-                        logger.info("video_downloaded", video_url=video_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
-                        message_data["video_url"] = video_url
-                        message_data["local_file_path"] = local_file_path
-                    else:
-                        logger.warning("video_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
+            elif message.video:
+                logger.info("processing_video_message", chat_id=message.chat.id if message.chat else None)
+                message_data["type"] = "video"
+                # Обрабатываем форматирование caption, если есть
+                if message.caption_entities:
+                    from app.utils.text_formatter import apply_formatting
+                    formatted_caption, caption_parse_mode = apply_formatting(
+                        message.caption or "",
+                        message.caption_entities
+                    )
+                    message_data["caption"] = formatted_caption
+                    message_data["parse_mode"] = caption_parse_mode
+                else:
+                    message_data["caption"] = message.caption
+                if client:
+                    try:
+                        # Скачиваем видео и получаем публичный URL и локальный путь
+                        logger.info("downloading_video_start", chat_id=message.chat.id if message.chat else None)
+                        video_url, local_file_path = await download_and_store_media(client, message, "video")
+                        if video_url and local_file_path:
+                            logger.info("video_downloaded", video_url=video_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
+                            message_data["video_url"] = video_url
+                            message_data["local_file_path"] = local_file_path
+                        else:
+                            logger.warning("video_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
+                            message_data["video_url"] = None
+                            message_data["local_file_path"] = None
+                    except Exception as e:
+                        logger.error("failed_to_get_video_url", error=str(e), exc_info=True)
                         message_data["video_url"] = None
                         message_data["local_file_path"] = None
-                except Exception as e:
-                    logger.error("failed_to_get_video_url", error=str(e), exc_info=True)
+                else:
                     message_data["video_url"] = None
                     message_data["local_file_path"] = None
-            else:
-                message_data["video_url"] = None
-                message_data["local_file_path"] = None
-        elif message.document:
-            logger.info("processing_document_message", chat_id=message.chat.id if message.chat else None)
-            message_data["type"] = "document"
-            # Обрабатываем форматирование caption, если есть
-            if message.caption_entities:
-                from app.utils.text_formatter import apply_formatting
-                formatted_caption, caption_parse_mode = apply_formatting(
-                    message.caption or "",
-                    message.caption_entities
-                )
-                message_data["caption"] = formatted_caption
-                message_data["parse_mode"] = caption_parse_mode
-            else:
-                message_data["caption"] = message.caption
-            if client:
-                try:
-                    # Скачиваем документ и получаем публичный URL и локальный путь
-                    logger.info("downloading_document_start", chat_id=message.chat.id if message.chat else None)
-                    document_url, local_file_path = await download_and_store_media(client, message, "document")
-                    if document_url and local_file_path:
-                        logger.info("document_downloaded", document_url=document_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
-                        message_data["document_url"] = document_url
-                        message_data["local_file_path"] = local_file_path
-                    else:
-                        logger.warning("document_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
+            elif message.document:
+                logger.info("processing_document_message", chat_id=message.chat.id if message.chat else None)
+                message_data["type"] = "document"
+                # Обрабатываем форматирование caption, если есть
+                if message.caption_entities:
+                    from app.utils.text_formatter import apply_formatting
+                    formatted_caption, caption_parse_mode = apply_formatting(
+                        message.caption or "",
+                        message.caption_entities
+                    )
+                    message_data["caption"] = formatted_caption
+                    message_data["parse_mode"] = caption_parse_mode
+                else:
+                    message_data["caption"] = message.caption
+                if client:
+                    try:
+                        # Скачиваем документ и получаем публичный URL и локальный путь
+                        logger.info("downloading_document_start", chat_id=message.chat.id if message.chat else None)
+                        document_url, local_file_path = await download_and_store_media(client, message, "document")
+                        if document_url and local_file_path:
+                            logger.info("document_downloaded", document_url=document_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
+                            message_data["document_url"] = document_url
+                            message_data["local_file_path"] = local_file_path
+                        else:
+                            logger.warning("document_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
+                            message_data["document_url"] = None
+                            message_data["local_file_path"] = None
+                    except Exception as e:
+                        logger.error("failed_to_get_document_url", error=str(e), exc_info=True)
                         message_data["document_url"] = None
                         message_data["local_file_path"] = None
-                except Exception as e:
-                    logger.error("failed_to_get_document_url", error=str(e), exc_info=True)
+                else:
+                    logger.warning("no_client_for_document_download", chat_id=message.chat.id if message.chat else None)
                     message_data["document_url"] = None
                     message_data["local_file_path"] = None
-            else:
-                logger.warning("no_client_for_document_download", chat_id=message.chat.id if message.chat else None)
-                message_data["document_url"] = None
-                message_data["local_file_path"] = None
-        elif message.animation:
-            # Обработка GIF (message.animation)
-            # В Pyrogram animation похож на video, но это специальный тип для анимированных GIF
-            logger.info("processing_animation_message", chat_id=message.chat.id if message.chat else None)
-            message_data["type"] = "video"  # Обрабатываем animation как video для MAX API
-            # Обрабатываем форматирование caption, если есть
-            if message.caption_entities:
-                from app.utils.text_formatter import apply_formatting
-                formatted_caption, caption_parse_mode = apply_formatting(
-                    message.caption or "",
-                    message.caption_entities
-                )
-                message_data["caption"] = formatted_caption
-                message_data["parse_mode"] = caption_parse_mode
-            else:
-                message_data["caption"] = message.caption
-            if client:
-                try:
-                    # Скачиваем animation (GIF) и получаем публичный URL и локальный путь
-                    # Используем "animation" как тип для скачивания
-                    logger.info("downloading_animation_start", chat_id=message.chat.id if message.chat else None)
-                    animation_url, local_file_path = await download_and_store_media(client, message, "animation")
-                    if animation_url and local_file_path:
-                        logger.info("animation_downloaded", animation_url=animation_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
-                        message_data["video_url"] = animation_url  # Используем video_url для совместимости с send_video
-                        message_data["local_file_path"] = local_file_path
-                    else:
-                        logger.warning("animation_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
+            elif message.animation:
+                # Обработка GIF (message.animation)
+                # В Pyrogram animation похож на video, но это специальный тип для анимированных GIF
+                logger.info("processing_animation_message", chat_id=message.chat.id if message.chat else None)
+                message_data["type"] = "video"  # Обрабатываем animation как video для MAX API
+                # Обрабатываем форматирование caption, если есть
+                if message.caption_entities:
+                    from app.utils.text_formatter import apply_formatting
+                    formatted_caption, caption_parse_mode = apply_formatting(
+                        message.caption or "",
+                        message.caption_entities
+                    )
+                    message_data["caption"] = formatted_caption
+                    message_data["parse_mode"] = caption_parse_mode
+                else:
+                    message_data["caption"] = message.caption
+                if client:
+                    try:
+                        # Скачиваем animation (GIF) и получаем публичный URL и локальный путь
+                        # Используем "animation" как тип для скачивания
+                        logger.info("downloading_animation_start", chat_id=message.chat.id if message.chat else None)
+                        animation_url, local_file_path = await download_and_store_media(client, message, "animation")
+                        if animation_url and local_file_path:
+                            logger.info("animation_downloaded", animation_url=animation_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
+                            message_data["video_url"] = animation_url  # Используем video_url для совместимости с send_video
+                            message_data["local_file_path"] = local_file_path
+                        else:
+                            logger.warning("animation_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
+                            message_data["video_url"] = None
+                            message_data["local_file_path"] = None
+                    except Exception as e:
+                        logger.error("failed_to_get_animation_url", error=str(e), exc_info=True)
                         message_data["video_url"] = None
                         message_data["local_file_path"] = None
-                except Exception as e:
-                    logger.error("failed_to_get_animation_url", error=str(e), exc_info=True)
+                else:
+                    logger.warning("no_client_for_animation_download", chat_id=message.chat.id if message.chat else None)
                     message_data["video_url"] = None
                     message_data["local_file_path"] = None
-            else:
-                logger.warning("no_client_for_animation_download", chat_id=message.chat.id if message.chat else None)
-                message_data["video_url"] = None
-                message_data["local_file_path"] = None
-        elif message.audio:
-            message_data["type"] = "audio"
-            message_data["caption"] = message.caption
-            if client:
-                try:
-                    message_data["audio_url"] = await get_media_url(client, message)
-                except Exception as e:
-                    logger.warning("failed_to_get_audio_url", error=str(e))
+            elif message.audio:
+                message_data["type"] = "audio"
+                message_data["caption"] = message.caption
+                if client:
+                    try:
+                        message_data["audio_url"] = await get_media_url(client, message)
+                    except Exception as e:
+                        logger.warning("failed_to_get_audio_url", error=str(e))
+                        message_data["audio_url"] = None
+                else:
                     message_data["audio_url"] = None
-            else:
-                message_data["audio_url"] = None
-        elif message.voice:
-            message_data["type"] = "voice"
-            if client:
-                try:
-                    message_data["voice_url"] = await get_media_url(client, message)
-                except Exception as e:
-                    logger.warning("failed_to_get_voice_url", error=str(e))
+            elif message.voice:
+                message_data["type"] = "voice"
+                if client:
+                    try:
+                        message_data["voice_url"] = await get_media_url(client, message)
+                    except Exception as e:
+                        logger.warning("failed_to_get_voice_url", error=str(e))
+                        message_data["voice_url"] = None
+                else:
                     message_data["voice_url"] = None
-            else:
-                message_data["voice_url"] = None
-        elif message.sticker:
-            logger.info("processing_sticker_message", chat_id=message.chat.id if message.chat else None)
-            message_data["type"] = "sticker"
-            if client:
-                try:
-                    # Скачиваем стикер и получаем публичный URL и локальный путь
-                    logger.info("downloading_sticker_start", chat_id=message.chat.id if message.chat else None)
-                    sticker_url, local_file_path = await download_and_store_media(client, message, "sticker")
-                    if sticker_url and local_file_path:
-                        logger.info("sticker_downloaded", sticker_url=sticker_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
-                        message_data["sticker_url"] = sticker_url
-                        message_data["local_file_path"] = local_file_path
-                    else:
-                        logger.warning("sticker_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
+            elif message.video_note:
+                # Обработка video note (кружочки)
+                # Video note - это обычное MP4 видео в квадратном формате, обрабатываем как video
+                logger.info("processing_video_note_message", chat_id=message.chat.id if message.chat else None)
+                message_data["type"] = "video"  # Обрабатываем video_note как video для MAX API
+                # Обрабатываем форматирование caption, если есть
+                if message.caption_entities:
+                    from app.utils.text_formatter import apply_formatting
+                    formatted_caption, caption_parse_mode = apply_formatting(
+                        message.caption or "",
+                        message.caption_entities
+                    )
+                    message_data["caption"] = formatted_caption
+                    message_data["parse_mode"] = caption_parse_mode
+                else:
+                    message_data["caption"] = message.caption
+                if client:
+                    try:
+                        # Скачиваем video note и получаем публичный URL и локальный путь
+                        logger.info("downloading_video_note_start", chat_id=message.chat.id if message.chat else None)
+                        video_url, local_file_path = await download_and_store_media(client, message, "video_note")
+                        if video_url and local_file_path:
+                            logger.info("video_note_downloaded", video_url=video_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
+                            message_data["video_url"] = video_url
+                            message_data["local_file_path"] = local_file_path
+                        else:
+                            logger.warning("video_note_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
+                            message_data["video_url"] = None
+                            message_data["local_file_path"] = None
+                    except Exception as e:
+                        logger.error("failed_to_get_video_note_url", error=str(e), exc_info=True)
+                        message_data["video_url"] = None
+                        message_data["local_file_path"] = None
+                else:
+                    logger.warning("no_client_for_video_note_download", chat_id=message.chat.id if message.chat else None)
+                    message_data["video_url"] = None
+                    message_data["local_file_path"] = None
+            elif message.sticker:
+                logger.info("processing_sticker_message", chat_id=message.chat.id if message.chat else None)
+                message_data["type"] = "sticker"
+                if client:
+                    try:
+                        # Скачиваем стикер и получаем публичный URL и локальный путь
+                        logger.info("downloading_sticker_start", chat_id=message.chat.id if message.chat else None)
+                        sticker_url, local_file_path = await download_and_store_media(client, message, "sticker")
+                        if sticker_url and local_file_path:
+                            logger.info("sticker_downloaded", sticker_url=sticker_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
+                            message_data["sticker_url"] = sticker_url
+                            message_data["local_file_path"] = local_file_path
+                        else:
+                            logger.warning("sticker_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
+                            message_data["sticker_url"] = None
+                            message_data["local_file_path"] = None
+                    except Exception as e:
+                        logger.error("failed_to_get_sticker_url", error=str(e), exc_info=True)
                         message_data["sticker_url"] = None
                         message_data["local_file_path"] = None
-                except Exception as e:
-                    logger.error("failed_to_get_sticker_url", error=str(e), exc_info=True)
+                else:
+                    logger.warning("no_client_for_sticker_download", chat_id=message.chat.id if message.chat else None)
                     message_data["sticker_url"] = None
                     message_data["local_file_path"] = None
-            else:
-                logger.warning("no_client_for_sticker_download", chat_id=message.chat.id if message.chat else None)
-                message_data["sticker_url"] = None
-                message_data["local_file_path"] = None
-        
-        # Обработка форматирования
-        parse_mode = None
-        if message.entities:
-            from app.utils.text_formatter import apply_formatting
-            formatted_text, parse_mode = apply_formatting(
-                message_data.get("text", ""),
-                message.entities
-            )
-            message_data["text"] = formatted_text
-            message_data["parse_mode"] = parse_mode
-        
-        # Получаем ID канала Telegram
-        telegram_chat_id = message.chat.id if message.chat else None
-        if not telegram_chat_id:
-            return
-        
-        # Находим запись канала в БД по channel_id
-        from app.models.telegram_channel import TelegramChannel
-        async with async_session_maker() as session:
-            result = await session.execute(
-                select(TelegramChannel).where(TelegramChannel.channel_id == telegram_chat_id)
-            )
-            telegram_channel = result.scalar_one_or_none()
             
-            if not telegram_channel:
-                logger.debug(
-                    "telegram_channel_not_found",
-                    channel_id=telegram_chat_id,
-                    channel_title=message.chat.title if message.chat else None
+            # Обработка форматирования
+            parse_mode = None
+            if message.entities:
+                from app.utils.text_formatter import apply_formatting
+                formatted_text, parse_mode = apply_formatting(
+                    message_data.get("text", ""),
+                    message.entities
                 )
+                message_data["text"] = formatted_text
+                message_data["parse_mode"] = parse_mode
+            
+            # Получаем ID канала Telegram
+            telegram_chat_id = message.chat.id if message.chat else None
+            if not telegram_chat_id:
                 return
             
-            # Используем ID записи в БД для поиска связей
-            telegram_channel_id = telegram_channel.id
-            logger.info(
-                "processing_message_from_telegram",
-                telegram_channel_db_id=telegram_channel_id,
-                telegram_chat_id=telegram_chat_id,
-                message_id=message.id,
-                channel_title=message.chat.title if message.chat else None
+            # Находим запись канала в БД по channel_id
+            from app.models.telegram_channel import TelegramChannel
+            async with async_session_maker() as session:
+                result = await session.execute(
+                    select(TelegramChannel).where(TelegramChannel.channel_id == telegram_chat_id)
+                )
+                telegram_channel = result.scalar_one_or_none()
+                
+                if not telegram_channel:
+                    logger.debug(
+                        "telegram_channel_not_found",
+                        channel_id=telegram_chat_id,
+                        channel_title=message.chat.title if message.chat else None
+                    )
+                    return
+                
+                # Используем ID записи в БД для поиска связей
+                telegram_channel_id = telegram_channel.id
+                logger.info(
+                    "processing_message_from_telegram",
+                    telegram_channel_db_id=telegram_channel_id,
+                    telegram_chat_id=telegram_chat_id,
+                    message_id=message.id,
+                    channel_title=message.chat.title if message.chat else None
+                )
+            
+                # Обрабатываем сообщение
+                result = await self.process_message(
+                    telegram_channel_id=telegram_channel_id,
+                    telegram_message_id=message.id,
+                    message_data=message_data
+                )
+                logger.info(
+                    "process_message_result",
+                    telegram_channel_id=telegram_channel_id,
+                    message_id=message.id,
+                    result=result,
+                    success=result is True
+                )
+        except Exception as e:
+            # КРИТИЧНО: Обрабатываем любые ошибки при обработке сообщения из Telegram
+            # Логируем ошибку, но не прерываем кросспостинг - продолжаем со следующего сообщения
+            logger.error(
+                "error_processing_telegram_message",
+                message_id=message.id if message else None,
+                chat_id=message.chat.id if message and message.chat else None,
+                error=str(e),
+                exc_info=True
             )
-        
-        # Обрабатываем сообщение
-        result = await self.process_message(
-            telegram_channel_id=telegram_channel_id,
-            telegram_message_id=message.id,
-            message_data=message_data
-        )
-        logger.info(
-            "process_message_result",
-            telegram_channel_id=telegram_channel_id,
-            message_id=message.id,
-            result=result,
-            success=result is True
-        )
+            # Просто возвращаемся - сообщение пропущено, кросспостинг продолжается
+            return
     
     async def _process_media_group(self, messages: List, client=None, link_id: Optional[int] = None) -> None:
         """
