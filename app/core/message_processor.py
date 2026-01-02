@@ -249,6 +249,22 @@ class MessageProcessor:
                             # Конкретные исключения для API ошибок
                             error_msg = str(e)
                             processing_time = int((datetime.utcnow() - link_start_time).total_seconds() * 1000)
+                            
+                            # Проверяем, является ли это ошибкой неподдерживаемого формата (TGS стикеры и т.д.)
+                            # В таком случае просто пропускаем пост, не создавая запись об ошибке
+                            error_lower = error_msg.lower()
+                            if any(keyword in error_lower for keyword in ['tgs', 'не поддерживается', 'not supported', 'стикер не поддерживается']):
+                                logger.info("message_skipped_unsupported_format", link_id=link.id, telegram_message_id=telegram_message_id, error=error_msg)
+                                # Удаляем запись из лога, так как пост пропускается
+                                try:
+                                    async with async_session_maker() as skip_session:
+                                        await skip_session.delete(message_log)
+                                        await skip_session.commit()
+                                except Exception as delete_error:
+                                    logger.warning("failed_to_delete_message_log_for_skipped", error=str(delete_error))
+                                # Возвращаем None, чтобы пост был пропущен
+                                return (link.id, None, None, processing_time)
+                            
                             await self._handle_send_error(
                                 link.id,
                                 telegram_message_id,
@@ -302,6 +318,12 @@ class MessageProcessor:
                             continue
                         
                         link_id, max_message, error_msg, processing_time = result
+                        
+                        # Если error_msg=None, это означает, что пост был пропущен (неподдерживаемый формат)
+                        # Не обрабатываем такие посты дальше
+                        if error_msg is None and max_message is None:
+                            logger.debug("message_skipped_in_parallel_processing", link_id=link_id, telegram_message_id=telegram_message_id)
+                            continue
                         
                         if max_message:
                             message_log = next(ml for l, ml in message_logs if l.id == link_id)
@@ -513,6 +535,106 @@ class MessageProcessor:
                             logger.warning("failed_to_delete_video_after_error", file_path=local_file_path, error=str(delete_error))
                     logger.warning("failed_to_send_video", error=str(e), video_url=video_url)
                     raise
+            elif message_type == "document":
+                from app.utils.media_handler import delete_media_file
+                document_url = message_data.get("document_url")
+                local_file_path = message_data.get("local_file_path")
+                caption = message_data.get("caption")
+                parse_mode = message_data.get("parse_mode")
+                
+                if not local_file_path:
+                    # Fallback: отправляем текст, если не удалось скачать документ
+                    text = message_data.get("text", message_data.get("caption", "")) or "[Документ]"
+                    return await self.max_client.send_message(
+                        chat_id=max_channel_id,
+                        text=text,
+                        parse_mode=parse_mode
+                    )
+                
+                try:
+                    result = await self.max_client.send_document(
+                        chat_id=max_channel_id,
+                        document_url=document_url,
+                        caption=caption,
+                        local_file_path=local_file_path,
+                        parse_mode=parse_mode
+                    )
+                    # Удаляем файл после успешной отправки (ДО return)
+                    if local_file_path:
+                        try:
+                            await delete_media_file(local_file_path)
+                            logger.info("document_file_deleted_after_send", file_path=local_file_path)
+                        except Exception as delete_error:
+                            # Логируем ошибку удаления, но не прерываем процесс
+                            logger.warning("failed_to_delete_document_after_send", file_path=local_file_path, error=str(delete_error))
+                    return result
+                except Exception as e:
+                    # Удаляем файл даже при ошибке отправки
+                    if local_file_path:
+                        try:
+                            await delete_media_file(local_file_path)
+                            logger.info("document_file_deleted_after_error", file_path=local_file_path)
+                        except Exception as delete_error:
+                            logger.warning("failed_to_delete_document_after_error", file_path=local_file_path, error=str(delete_error))
+                    logger.warning("failed_to_send_document", error=str(e), document_url=document_url)
+                    raise
+            elif message_type == "sticker":
+                from app.utils.media_handler import delete_media_file
+                sticker_url = message_data.get("sticker_url")
+                local_file_path = message_data.get("local_file_path")
+                
+                if not local_file_path:
+                    # Если не удалось скачать стикер, пропускаем его
+                    logger.warning("sticker_not_downloaded_skipping", chat_id=max_channel_id)
+                    raise APIError("Стикер не удалось скачать")
+                
+                try:
+                    result = await self.max_client.send_sticker(
+                        chat_id=max_channel_id,
+                        sticker_url=sticker_url,
+                        local_file_path=local_file_path
+                    )
+                    # Удаляем файл после успешной отправки (ДО return)
+                    if local_file_path:
+                        try:
+                            await delete_media_file(local_file_path)
+                            logger.info("sticker_file_deleted_after_send", file_path=local_file_path)
+                        except Exception as delete_error:
+                            # Логируем ошибку удаления, но не прерываем процесс
+                            logger.warning("failed_to_delete_sticker_after_send", file_path=local_file_path, error=str(delete_error))
+                    return result
+                except APIError as e:
+                    # Для TGS стикеров и других неподдерживаемых форматов - пропускаем
+                    error_msg = str(e).lower()
+                    if 'tgs' in error_msg or 'не поддерживается' in error_msg or 'not supported' in error_msg:
+                        logger.info("sticker_not_supported_skipping", error=str(e), sticker_url=sticker_url, chat_id=max_channel_id)
+                        # Удаляем файл
+                        if local_file_path:
+                            try:
+                                await delete_media_file(local_file_path)
+                            except Exception as delete_error:
+                                logger.warning("failed_to_delete_unsupported_sticker", file_path=local_file_path, error=str(delete_error))
+                        # Пропускаем стикер - выбрасываем исключение, которое будет обработано выше
+                        raise APIError(f"Стикер не поддерживается: {e}")
+                    # Для других ошибок - удаляем файл и пробрасываем
+                    if local_file_path:
+                        try:
+                            await delete_media_file(local_file_path)
+                            logger.info("sticker_file_deleted_after_error", file_path=local_file_path)
+                        except Exception as delete_error:
+                            logger.warning("failed_to_delete_sticker_after_error", file_path=local_file_path, error=str(delete_error))
+                    logger.warning("failed_to_send_sticker", error=str(e), sticker_url=sticker_url)
+                    raise
+                except Exception as e:
+                    # Удаляем файл даже при ошибке отправки
+                    if local_file_path:
+                        try:
+                            await delete_media_file(local_file_path)
+                            logger.info("sticker_file_deleted_after_error", file_path=local_file_path)
+                        except Exception as delete_error:
+                            logger.warning("failed_to_delete_sticker_after_error", file_path=local_file_path, error=str(delete_error))
+                    logger.warning("failed_to_send_sticker", error=str(e), sticker_url=sticker_url)
+                    raise
             else:
                 # Для других типов отправляем как текст с указанием типа
                 text = message_data.get("text", message_data.get("caption", "")) or f"[{message_type}]"
@@ -543,7 +665,8 @@ class MessageProcessor:
         from app.utils.media_handler import get_media_url, download_and_store_media
         
         # Пропускаем только полностью пустые сообщения (без текста, caption и медиа)
-        if not message.text and not message.caption and not (message.photo or message.video or message.document or message.audio or message.voice or message.sticker):
+        # ВАЖНО: Добавляем message.animation для поддержки GIF
+        if not message.text and not message.caption and not (message.photo or message.video or message.document or message.audio or message.voice or message.sticker or message.animation):
             logger.debug("skipping_empty_message", chat_id=message.chat.id if message.chat else None)
             return
         
@@ -638,16 +761,78 @@ class MessageProcessor:
                 message_data["video_url"] = None
                 message_data["local_file_path"] = None
         elif message.document:
+            logger.info("processing_document_message", chat_id=message.chat.id if message.chat else None)
             message_data["type"] = "document"
-            message_data["caption"] = message.caption
+            # Обрабатываем форматирование caption, если есть
+            if message.caption_entities:
+                from app.utils.text_formatter import apply_formatting
+                formatted_caption, caption_parse_mode = apply_formatting(
+                    message.caption or "",
+                    message.caption_entities
+                )
+                message_data["caption"] = formatted_caption
+                message_data["parse_mode"] = caption_parse_mode
+            else:
+                message_data["caption"] = message.caption
             if client:
                 try:
-                    message_data["document_url"] = await get_media_url(client, message)
+                    # Скачиваем документ и получаем публичный URL и локальный путь
+                    logger.info("downloading_document_start", chat_id=message.chat.id if message.chat else None)
+                    document_url, local_file_path = await download_and_store_media(client, message, "document")
+                    if document_url and local_file_path:
+                        logger.info("document_downloaded", document_url=document_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
+                        message_data["document_url"] = document_url
+                        message_data["local_file_path"] = local_file_path
+                    else:
+                        logger.warning("document_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
+                        message_data["document_url"] = None
+                        message_data["local_file_path"] = None
                 except Exception as e:
-                    logger.warning("failed_to_get_document_url", error=str(e))
+                    logger.error("failed_to_get_document_url", error=str(e), exc_info=True)
                     message_data["document_url"] = None
+                    message_data["local_file_path"] = None
             else:
+                logger.warning("no_client_for_document_download", chat_id=message.chat.id if message.chat else None)
                 message_data["document_url"] = None
+                message_data["local_file_path"] = None
+        elif message.animation:
+            # Обработка GIF (message.animation)
+            # В Pyrogram animation похож на video, но это специальный тип для анимированных GIF
+            logger.info("processing_animation_message", chat_id=message.chat.id if message.chat else None)
+            message_data["type"] = "video"  # Обрабатываем animation как video для MAX API
+            # Обрабатываем форматирование caption, если есть
+            if message.caption_entities:
+                from app.utils.text_formatter import apply_formatting
+                formatted_caption, caption_parse_mode = apply_formatting(
+                    message.caption or "",
+                    message.caption_entities
+                )
+                message_data["caption"] = formatted_caption
+                message_data["parse_mode"] = caption_parse_mode
+            else:
+                message_data["caption"] = message.caption
+            if client:
+                try:
+                    # Скачиваем animation (GIF) и получаем публичный URL и локальный путь
+                    # Используем "animation" как тип для скачивания
+                    logger.info("downloading_animation_start", chat_id=message.chat.id if message.chat else None)
+                    animation_url, local_file_path = await download_and_store_media(client, message, "animation")
+                    if animation_url and local_file_path:
+                        logger.info("animation_downloaded", animation_url=animation_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
+                        message_data["video_url"] = animation_url  # Используем video_url для совместимости с send_video
+                        message_data["local_file_path"] = local_file_path
+                    else:
+                        logger.warning("animation_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
+                        message_data["video_url"] = None
+                        message_data["local_file_path"] = None
+                except Exception as e:
+                    logger.error("failed_to_get_animation_url", error=str(e), exc_info=True)
+                    message_data["video_url"] = None
+                    message_data["local_file_path"] = None
+            else:
+                logger.warning("no_client_for_animation_download", chat_id=message.chat.id if message.chat else None)
+                message_data["video_url"] = None
+                message_data["local_file_path"] = None
         elif message.audio:
             message_data["type"] = "audio"
             message_data["caption"] = message.caption
@@ -670,15 +855,29 @@ class MessageProcessor:
             else:
                 message_data["voice_url"] = None
         elif message.sticker:
+            logger.info("processing_sticker_message", chat_id=message.chat.id if message.chat else None)
             message_data["type"] = "sticker"
             if client:
                 try:
-                    message_data["sticker_url"] = await get_media_url(client, message)
+                    # Скачиваем стикер и получаем публичный URL и локальный путь
+                    logger.info("downloading_sticker_start", chat_id=message.chat.id if message.chat else None)
+                    sticker_url, local_file_path = await download_and_store_media(client, message, "sticker")
+                    if sticker_url and local_file_path:
+                        logger.info("sticker_downloaded", sticker_url=sticker_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
+                        message_data["sticker_url"] = sticker_url
+                        message_data["local_file_path"] = local_file_path
+                    else:
+                        logger.warning("sticker_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
+                        message_data["sticker_url"] = None
+                        message_data["local_file_path"] = None
                 except Exception as e:
-                    logger.warning("failed_to_get_sticker_url", error=str(e))
+                    logger.error("failed_to_get_sticker_url", error=str(e), exc_info=True)
                     message_data["sticker_url"] = None
+                    message_data["local_file_path"] = None
             else:
+                logger.warning("no_client_for_sticker_download", chat_id=message.chat.id if message.chat else None)
                 message_data["sticker_url"] = None
+                message_data["local_file_path"] = None
         
         # Обработка форматирования
         parse_mode = None

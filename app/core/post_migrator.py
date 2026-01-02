@@ -185,6 +185,18 @@ class PostMigrator:
                 key=lambda item: item["date"]
             )
             
+            # ОГРАНИЧЕНИЕ: Берем только последние 50 постов
+            MAX_POSTS_TO_MIGRATE = 50
+            if len(items_to_process_sorted) > MAX_POSTS_TO_MIGRATE:
+                items_to_process_sorted = items_to_process_sorted[-MAX_POSTS_TO_MIGRATE:]
+                logger.info(
+                    "migration_limited_to_last_posts",
+                    link_id=link_id,
+                    original_count=len(items_to_process),
+                    limited_count=len(items_to_process_sorted),
+                    max_posts=MAX_POSTS_TO_MIGRATE
+                )
+            
             logger.info(
                 "items_sorted_for_migration",
                                link_id=link_id,
@@ -193,61 +205,93 @@ class PostMigrator:
                 standalone_messages=len(standalone_messages)
             )
             
+            # Обновляем статистику с учетом ограничения
+            stats["total"] = len(items_to_process_sorted)
+            
             # Обрабатываем все элементы в хронологическом порядке
             processed_count = 0
             last_progress_update = start_time
             
             for item in items_to_process_sorted:
-                # КРИТИЧНО: Проверяем, не была ли миграция остановлена
-                if not await migration_queue.is_migrating(link_id):
-                    logger.info("migration_stopped_by_user", link_id=link_id, processed=processed_count, total=len(items_to_process_sorted))
-                    break
-                
-                if item["type"] == "media_group":
-                    # Обработка медиа-группы
-                    group = item["group"]
-                    processed_count += 1  # Считаем как 1 пост
+                # КРИТИЧНО: Обертываем обработку каждого элемента в try-except,
+                # чтобы при любой ошибке миграция продолжалась со следующего поста
+                try:
+                    # КРИТИЧНО: Проверяем, не была ли миграция остановлена
+                    if not await migration_queue.is_migrating(link_id):
+                        logger.info("migration_stopped_by_user", link_id=link_id, processed=processed_count, total=len(items_to_process_sorted))
+                        # ВАЖНО: Устанавливаем флаг, чтобы finally блок знал, что нужно восстановить состояние
+                        # Это предотвращает ситуацию, когда миграция прервана, но состояние не восстановлено
+                        break
                     
-                    # Проверка на дублирование для медиа-группы
-                    group_ids = {msg.id for msg in group}
-                    if any(msg_id in existing_message_ids for msg_id in group_ids):
-                        stats["skipped"] += 1  # Считаем как 1 пропущенный пост
-                        stats["skipped_duplicate"] += 1
-                        logger.debug("media_group_skipped_duplicate", group_size=len(group), link_id=link_id)
-                        continue
+                    if item["type"] == "media_group":
+                        # Обработка медиа-группы
+                        group = item["group"]
+                        processed_count += 1  # Считаем как 1 пост
+                        
+                        # Проверка на дублирование для медиа-группы
+                        group_ids = {msg.id for msg in group}
+                        if any(msg_id in existing_message_ids for msg_id in group_ids):
+                            stats["skipped"] += 1  # Считаем как 1 пропущенный пост
+                            stats["skipped_duplicate"] += 1
+                            logger.debug("media_group_skipped_duplicate", group_size=len(group), link_id=link_id)
+                            continue
+                        
+                        # Обработка медиа-группы
+                        try:
+                            # ВАЖНО: Добавляем таймаут на обработку медиа-группы, чтобы миграция не зависала
+                            # даже если HTTP-запрос зависнет или будет выполняться очень долго
+                            try:
+                                # Таймаут на обработку медиа-группы: 10 минут (600 секунд)
+                                # Медиа-группы могут содержать много файлов, поэтому таймаут больше
+                                media_group_timeout = 600  # 10 минут
+                                await asyncio.wait_for(
+                                    self.message_processor._process_media_group(
+                                        group,
+                                        client=self.pyrogram_client,
+                                        link_id=link_id
+                                    ),
+                                    timeout=media_group_timeout
+                                )
+                            except asyncio.TimeoutError:
+                                # Если обработка медиа-группы превысила таймаут, считаем её неудачной
+                                logger.error(
+                                    "media_group_migration_timeout",
+                                    group_size=len(group),
+                                    link_id=link_id,
+                                    timeout=media_group_timeout,
+                                    processed=processed_count,
+                                    total=len(items_to_process_sorted)
+                                )
+                                stats["failed"] += 1  # Считаем как 1 неудачный пост
+                                # Продолжаем обработку следующих постов
+                                continue
+                            
+                            # Добавляем все ID группы в кэш
+                            for msg in group:
+                                existing_message_ids.add(msg.id)
+                            
+                            stats["success"] += 1  # Считаем как 1 успешный пост
+                            logger.info("media_group_migrated", group_size=len(group), link_id=link_id)
+                            
+                        except Exception as e:
+                            stats["failed"] += 1  # Считаем как 1 неудачный пост
+                            logger.error("media_group_migration_failed", error=str(e), group_size=len(group), link_id=link_id, exc_info=True)
+                            # Продолжаем обработку следующих постов даже при ошибке
+                            continue
                     
-                    # Обработка медиа-группы
-                    try:
-                        # Обрабатываем медиа-группу через MessageProcessor
-                        await self.message_processor._process_media_group(
-                            group,
-                            client=self.pyrogram_client,
-                            link_id=link_id
-                        )
-                        
-                        # Добавляем все ID группы в кэш
-                        for msg in group:
-                            existing_message_ids.add(msg.id)
-                        
-                        stats["success"] += 1  # Считаем как 1 успешный пост
-                        logger.info("media_group_migrated", group_size=len(group), link_id=link_id)
-                        
-                    except Exception as e:
-                        stats["failed"] += 1  # Считаем как 1 неудачный пост
-                        logger.error("media_group_migration_failed", error=str(e), group_size=len(group), link_id=link_id, exc_info=True)
-                
-                elif item["type"] == "standalone":
-                    # Обработка отдельного поста
-                    msg = item["message"]
-                    processed_count += 1
+                    elif item["type"] == "standalone":
+                        # Обработка отдельного поста
+                        msg = item["message"]
+                        processed_count += 1
                     
                     # Пропускаем пустые сообщения (без текста, caption и медиа)
-                    has_content = bool(msg.text or msg.caption or msg.photo or msg.video or msg.document or msg.audio or msg.voice or msg.sticker)
+                    # ВАЖНО: Добавляем msg.animation для поддержки GIF
+                    has_content = bool(msg.text or msg.caption or msg.photo or msg.video or msg.document or msg.audio or msg.voice or msg.sticker or msg.animation)
                     
                     logger.info(
                         "processing_post",
                         message_id=msg.id,
-                        link_id=link_id,
+                                       link_id=link_id,
                         processed=processed_count,
                         total=len(items_to_process_sorted),
                         has_text=bool(msg.text),
@@ -266,32 +310,83 @@ class PostMigrator:
                     
                     try:
                         # Обработка с semaphore для контроля параллелизма (но последовательно)
+                        # ВАЖНО: Добавляем таймаут на обработку одного поста, чтобы миграция не зависала
+                        # даже если HTTP-запрос зависнет или будет выполняться очень долго
                         async with self.semaphore:
-                            result = await self._process_single_post(
-                                msg, link_id, telegram_channel_db_id, existing_message_ids
-                            )
+                            try:
+                                # Таймаут на обработку одного поста: 5 минут (300 секунд)
+                                # Это должно быть достаточно даже для больших файлов с повторными попытками
+                                post_timeout = 300  # 5 минут
+                                result = await asyncio.wait_for(
+                                    self._process_single_post(
+                                        msg, link_id, telegram_channel_db_id, existing_message_ids
+                                    ),
+                                    timeout=post_timeout
+                                )
+                            except asyncio.TimeoutError:
+                                # Если обработка поста превысила таймаут, считаем его неудачным
+                                logger.error(
+                                    "post_migration_timeout",
+                                    message_id=msg.id,
+                               link_id=link_id,
+                                    timeout=post_timeout,
+                                    processed=processed_count,
+                                    total=len(items_to_process_sorted)
+                                )
+                                stats["failed"] += 1
+                                # Продолжаем обработку следующих постов
+                                continue
                         
                         if result:
                             stats["success"] += 1
                             existing_message_ids.add(msg.id)
                             logger.info("post_migrated_success", message_id=msg.id, link_id=link_id, processed=processed_count, total=len(items_to_process_sorted))
                         else:
-                            stats["skipped"] += 1
-                            stats["skipped_duplicate"] += 1
-                            logger.info("post_skipped", message_id=msg.id, link_id=link_id, processed=processed_count, total=len(items_to_process_sorted))
+                            # Если result=False, это может быть дубликат или ошибка
+                            # Проверяем, был ли это дубликат или ошибка
+                            # Если это не дубликат (не в existing_ids), значит была ошибка
+                            if msg.id not in existing_message_ids:
+                                stats["failed"] += 1
+                                logger.warning("post_migration_failed_returned_false", message_id=msg.id, link_id=link_id, processed=processed_count, total=len(items_to_process_sorted))
+                                # Продолжаем обработку следующих постов даже при ошибке
+                                continue
+                            else:
+                                stats["skipped"] += 1
+                                stats["skipped_duplicate"] += 1
+                                logger.info("post_skipped", message_id=msg.id, link_id=link_id, processed=processed_count, total=len(items_to_process_sorted))
                             
                     except Exception as e:
                         stats["failed"] += 1
                         logger.error("post_migration_failed", message_id=msg.id, error=str(e), exc_info=True, processed=processed_count, total=len(items_to_process_sorted))
                         # Продолжаем обработку следующих постов даже при ошибке
+                        continue
+                    
+                    # Периодические обновления прогресса
+                    if progress_callback and (
+                        processed_count % settings.migration_progress_update_interval == 0 or
+                        (datetime.utcnow() - last_progress_update).total_seconds() >= settings.migration_progress_update_time
+                    ):
+                        await progress_callback(processed_count, stats["success"], stats["skipped"], stats["failed"])
+                        last_progress_update = datetime.utcnow()
                 
-                # Периодические обновления прогресса
-                if progress_callback and (
-                    processed_count % settings.migration_progress_update_interval == 0 or
-                    (datetime.utcnow() - last_progress_update).total_seconds() >= settings.migration_progress_update_time
-                ):
-                    await progress_callback(processed_count, stats["success"], stats["skipped"], stats["failed"])
-                    last_progress_update = datetime.utcnow()
+                except Exception as item_error:
+                    # КРИТИЧНО: Обрабатываем любые ошибки при обработке элемента (поста или медиа-группы)
+                    # Логируем ошибку, но продолжаем миграцию со следующего поста
+                    processed_count += 1  # Увеличиваем счетчик, чтобы не застрять на одном посте
+                    stats["failed"] += 1
+                    logger.error(
+                        "item_migration_failed",
+                        item_type=item.get("type", "unknown"),
+                        message_id=item.get("message", {}).id if item.get("type") == "standalone" else None,
+                        group_size=len(item.get("group", [])) if item.get("type") == "media_group" else None,
+                                       link_id=link_id,
+                        error=str(item_error),
+                        processed=processed_count,
+                        total=len(items_to_process_sorted),
+                        exc_info=True
+                    )
+                    # Продолжаем обработку следующих постов
+                    continue
             
             logger.info(
                 "migration_completed",
@@ -306,13 +401,29 @@ class PostMigrator:
             )
             
         except Exception as e:
-            logger.error("migration_error", link_id=link_id, error=str(e), exc_info=True)
+            # КРИТИЧНО: Обрабатываем критические ошибки (например, проблемы с подключением к БД или Pyrogram)
+            # Такие ошибки логируем, но не прерываем миграцию - она уже обработала все посты, которые смогла
+            logger.error("migration_critical_error", link_id=link_id, error=str(e), exc_info=True)
             # Устанавливаем duration даже при ошибке
             end_time = datetime.utcnow()
             stats["duration"] = (end_time - start_time).total_seconds()
+            stats["error"] = str(e)  # Сохраняем ошибку в статистике
+            # НЕ пробрасываем исключение - миграция завершается с ошибкой в статистике,
+            # но не прерывается на уровне выше, чтобы finally блок мог выполнить восстановление состояния
         finally:
+            # КРИТИЧНО: Проверяем, что миграция все еще активна перед восстановлением состояния
+            # Это защищает от конфликтов между параллельными миграциями
+            is_still_active = await migration_queue.is_migrating(link_id)
+            if not is_still_active:
+                logger.warning(
+                    "migration_not_active_in_finally",
+                    link_id=link_id,
+                    message="Миграция не активна в finally блоке, возможно была остановлена другой миграцией"
+                )
+            
             # Восстанавливаем кросспостинг для связи (включаем обратно, если был включен до миграции)
-            if link_was_enabled is not None:
+            # ВАЖНО: Восстанавливаем состояние только если миграция была активна
+            if link_was_enabled is not None and is_still_active:
                 try:
                     async with async_session_maker() as session:
                         result = await session.execute(
@@ -420,6 +531,48 @@ class PostMigrator:
                                 # Оставляем отключенным, если был отключен до миграции
                                 logger.info("crossposting_remains_disabled_after_migration", link_id=link_id)
                 except Exception as e:
+                    # Логируем ошибку в основном блоке finally
+                    logger.error(
+                        "error_in_migration_finally_block",
+                                             link_id=link_id,
+                        error=str(e),
+                        exc_info=True
+                    )
+                    # Пытаемся хотя бы включить связь, даже если остальное не удалось
+                    if link_was_enabled:
+                        try:
+                            async with async_session_maker() as emergency_session:
+                                result = await emergency_session.execute(
+                                    select(CrosspostingLink).where(CrosspostingLink.id == link_id)
+                                )
+                                link = result.scalar_one_or_none()
+                                if link and not link.is_enabled:
+                                    link.is_enabled = True
+                                    await emergency_session.commit()
+                                    logger.info("link_enabled_in_emergency_finally", link_id=link_id)
+                        except Exception as emergency_error:
+                            logger.error("failed_to_enable_link_in_emergency", link_id=link_id, error=str(emergency_error))
+            else:
+                # КРИТИЧНО: Если link_was_enabled is None, значит миграция не дошла до установки этого значения
+                # Это может произойти при очень раннем прерывании. Пытаемся включить связь на всякий случай
+                try:
+                    async with async_session_maker() as session:
+                        result = await session.execute(
+                            select(CrosspostingLink).where(CrosspostingLink.id == link_id)
+                        )
+                        link = result.scalar_one_or_none()
+                        if link and not link.is_enabled:
+                            # Если связь отключена, но мы не знаем, была ли она включена до миграции,
+                            # включаем её на всякий случай (лучше включить лишний раз, чем оставить отключенной)
+                            link.is_enabled = True
+                            await session.commit()
+                            logger.warning(
+                                "link_enabled_in_finally_unknown_state",
+                               link_id=link_id,
+                                reason="link_was_enabled_is_none"
+                            )
+                except Exception as e:
+                    logger.error("failed_to_enable_link_when_unknown_state", link_id=link_id, error=str(e))
                     logger.error("failed_to_resume_crossposting_after_migration", link_id=link_id, error=str(e), exc_info=True)
             
             # Очищаем старые медиа-файлы (старше 1 часа) после завершения миграции
@@ -668,10 +821,71 @@ class PostMigrator:
                     logger.error("failed_to_download_video_in_migration", message_id=message.id, error=str(e), exc_info=True)
                     message_data["video_url"] = None
                     message_data["local_file_path"] = None
+        elif message.animation:
+            # Обработка GIF (message.animation)
+            # В Pyrogram animation похож на video, но это специальный тип для анимированных GIF
+            message_data["type"] = "video"  # Обрабатываем animation как video для MAX API
+            message_data["video"] = message.animation  # Используем video для совместимости
+            # Обрабатываем форматирование caption, если есть
+            if message.caption_entities:
+                from app.utils.text_formatter import apply_formatting
+                formatted_caption, caption_parse_mode = apply_formatting(
+                    message.caption or "",
+                    message.caption_entities
+                )
+                message_data["caption"] = formatted_caption
+                message_data["parse_mode"] = caption_parse_mode
+            else:
+                message_data["caption"] = message.caption
+            
+            # Скачиваем animation (GIF) если есть client
+            if client:
+                try:
+                    animation_url, local_file_path = await download_and_store_media(client, message, "animation")
+                    if animation_url and local_file_path:
+                        message_data["video_url"] = animation_url  # Используем video_url для совместимости с send_video
+                        message_data["local_file_path"] = local_file_path
+                    else:
+                        message_data["video_url"] = None
+                        message_data["local_file_path"] = None
+                except Exception as e:
+                    logger.error("failed_to_download_animation_in_migration", message_id=message.id, error=str(e), exc_info=True)
+                    message_data["video_url"] = None
+                    message_data["local_file_path"] = None
+            else:
+                message_data["video_url"] = None
+                message_data["local_file_path"] = None
         elif message.document:
             message_data["type"] = "document"
-            message_data["document"] = message.document
-            message_data["caption"] = message.caption
+            # Обрабатываем форматирование caption, если есть
+            if message.caption_entities:
+                from app.utils.text_formatter import apply_formatting
+                formatted_caption, caption_parse_mode = apply_formatting(
+                    message.caption or "",
+                    message.caption_entities
+                )
+                message_data["caption"] = formatted_caption
+                message_data["parse_mode"] = caption_parse_mode
+            else:
+                message_data["caption"] = message.caption
+            
+            # Скачиваем документ если есть client
+            if client:
+                try:
+                    document_url, local_file_path = await download_and_store_media(client, message, "document")
+                    if document_url and local_file_path:
+                        message_data["document_url"] = document_url
+                        message_data["local_file_path"] = local_file_path
+                    else:
+                        message_data["document_url"] = None
+                        message_data["local_file_path"] = None
+                except Exception as e:
+                    logger.error("failed_to_download_document_in_migration", message_id=message.id, error=str(e), exc_info=True)
+                    message_data["document_url"] = None
+                    message_data["local_file_path"] = None
+            else:
+                message_data["document_url"] = None
+                message_data["local_file_path"] = None
         elif message.audio:
             message_data["type"] = "audio"
             message_data["caption"] = message.caption
@@ -679,9 +893,28 @@ class PostMigrator:
             message_data["type"] = "voice"
         elif message.sticker:
             message_data["type"] = "sticker"
+            
+            # Скачиваем стикер если есть client
+            if client:
+                try:
+                    sticker_url, local_file_path = await download_and_store_media(client, message, "sticker")
+                    if sticker_url and local_file_path:
+                        message_data["sticker_url"] = sticker_url
+                        message_data["local_file_path"] = local_file_path
+                    else:
+                        message_data["sticker_url"] = None
+                        message_data["local_file_path"] = None
+                except Exception as e:
+                    logger.error("failed_to_download_sticker_in_migration", message_id=message.id, error=str(e), exc_info=True)
+                    message_data["sticker_url"] = None
+                    message_data["local_file_path"] = None
+            else:
+                message_data["sticker_url"] = None
+                message_data["local_file_path"] = None
         
         # Обработка форматирования текста (для текстовых сообщений)
-        if message.entities and not message.photo and not message.video:
+        # ВАЖНО: Добавляем message.animation в проверку
+        if message.entities and not message.photo and not message.video and not message.animation:
             from app.utils.text_formatter import apply_formatting
             formatted_text, parse_mode = apply_formatting(
                 message_data.get("text", ""),

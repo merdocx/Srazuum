@@ -47,6 +47,9 @@ async def download_and_store_media(
             media_obj = message.photo
         elif file_type == "video" and message.video:
             media_obj = message.video
+        elif file_type == "animation" and message.animation:
+            # GIF приходят как message.animation в Pyrogram
+            media_obj = message.animation
         elif file_type == "document" and message.document:
             media_obj = message.document
         elif file_type == "audio" and message.audio:
@@ -67,6 +70,7 @@ async def download_and_store_media(
             ext_map = {
                 "photo": "jpg",
                 "video": "mp4",
+                "animation": "gif",  # GIF файлы
                 "document": "bin",
                 "audio": "mp3",
                 "voice": "ogg",

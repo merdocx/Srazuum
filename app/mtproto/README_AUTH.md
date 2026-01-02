@@ -94,3 +94,5 @@ await receiver.start(session_string="ваш_session_string")
 
 
 
+
+

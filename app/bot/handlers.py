@@ -847,7 +847,7 @@ async def process_max_channel(message: Message, state: FSMContext):
             
             # Отправляем предложение миграции
             migration_text = (
-                "Вы так же можете один раз перенести все старые посты из Telegram-канала в MAX-канал."
+                "Перед началом работы вы можете один раз перенести последние 50 постов из Telegram-канала в MAX-канал."
             )
             migration_keyboard = get_migration_offer_keyboard(crossposting_link.id)
             await message.answer(

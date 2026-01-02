@@ -263,18 +263,21 @@ async def start_migration(link_id: int, user_id: int, chat_id: int):
             logger.info("session_string_loaded_from_file")
         
         # Создаем клиент
+        # ВАЖНО: Создаем уникальное имя сессии для каждой миграции, чтобы избежать конфликтов
+        # при параллельных миграциях разных пользователей
+        unique_session_name = f"migration_{link_id}_{user_id}"
+        
         if session_string:
             pyrogram_client = Client(
-                "migration_session",
+                unique_session_name,
                 session_string=session_string,
                 api_id=os.getenv("TELEGRAM_API_ID"),
                 api_hash=os.getenv("TELEGRAM_API_HASH")
             )
         else:
-            # Используем существующую сессию
-            session_name = "crossposting_session"
+            # Используем уникальное имя сессии для миграции
             pyrogram_client = Client(
-                session_name,
+                unique_session_name,
                 api_id=os.getenv("TELEGRAM_API_ID"),
                 api_hash=os.getenv("TELEGRAM_API_HASH")
             )

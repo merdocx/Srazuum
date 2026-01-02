@@ -603,6 +603,321 @@ class MaxAPIClient:
             logger.error("failed_to_send_video", chat_id=chat_id, error=str(e))
             raise APIError(f"Неожиданная ошибка при отправке видео: {e}")
     
+    async def send_document(
+        self,
+        chat_id: str,
+        document_url: str,
+        caption: Optional[str] = None,
+        local_file_path: Optional[str] = None,
+        parse_mode: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Отправить документ в канал.
+        
+        Args:
+            chat_id: ID канала в MAX
+            document_url: URL документа (для fallback)
+            caption: Подпись к документу
+            local_file_path: Путь к локальному файлу документа
+            parse_mode: Режим парсинга (HTML, Markdown)
+        
+        Returns:
+            Информация об отправленном сообщении
+        """
+        # Преобразуем chat_id в правильный формат для query parameter
+        chat_id_value = convert_chat_id(chat_id)
+        
+        # ВАЖНО: MAX API требует загрузку файла через /uploads endpoint
+        # Сначала загружаем файл, получаем token, затем используем его в attachments
+        # ПРИМЕЧАНИЕ: MAX API не поддерживает type=document, используем type=file
+        if local_file_path:
+            try:
+                token = await self.upload_file(local_file_path, "file")
+                
+                # Адаптивная задержка для документов
+                await asyncio.sleep(settings.media_processing_delay_video)  # Используем ту же задержку, что и для видео
+                
+                # Формируем запрос с attachments и payload.token
+                # ПРИМЕЧАНИЕ: MAX API использует "file" как attachment type для документов, а не "document"
+                text = caption or ""  # Пустая строка, если нет caption
+                data = {
+                    "text": text,
+                    "attachments": [{
+                        "type": "file",
+                        "payload": {
+                            "token": token
+                        }
+                    }]
+                }
+                if parse_mode:
+                    # MAX API использует "format" вместо "parse_mode"
+                    data["format"] = parse_mode
+                
+                await max_api_limiter.wait_if_needed(f"max_api_{chat_id}")
+                
+                # Пробуем отправить с повторными попытками при ошибке attachment.not.ready
+                max_retries = 5  # Для документов больше попыток
+                retry_delay = 3  # Больше задержка для документов
+                
+                for attempt in range(max_retries):
+                    try:
+                        response = await retry_with_backoff(
+                            self.client.post,
+                            f"/messages?chat_id={chat_id_value}",
+                            json=data
+                        )
+                        response.raise_for_status()
+                        result = response.json()
+                        
+                        # Проверяем на ошибку attachment.not.ready
+                        if 'error' in result or 'errors' in result:
+                            error_msg = str(result.get('error', result.get('errors', '')))
+                            if 'attachment.not.ready' in error_msg.lower() or 'not.ready' in error_msg.lower():
+                                if attempt < max_retries - 1:
+                                    logger.warning(f"document_attachment_not_ready_retry", attempt=attempt+1, delay=retry_delay)
+                                    await asyncio.sleep(retry_delay)
+                                    retry_delay *= 2  # Увеличиваем задержку
+                                    continue
+                        
+                        logger.info("document_sent", chat_id=chat_id, message_id=result.get("message_id"), result=result)
+                        return result
+                    except httpx.HTTPStatusError as e:
+                        if e.response:
+                            try:
+                                error_data = e.response.json()
+                                error_msg = str(error_data)
+                                if 'attachment.not.ready' in error_msg.lower() or 'not.ready' in error_msg.lower():
+                                    if attempt < max_retries - 1:
+                                        logger.warning(f"document_attachment_not_ready_retry", attempt=attempt+1, delay=retry_delay)
+                                        await asyncio.sleep(retry_delay)
+                                        retry_delay *= 2
+                                        continue
+                            except:
+                                pass
+                        if attempt == max_retries - 1:
+                            raise
+                    except Exception as e:
+                        if attempt == max_retries - 1:
+                            raise
+                        logger.warning(f"document_retry_after_error", attempt=attempt+1, error=str(e))
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2
+                
+            except Exception as e:
+                logger.error("failed_to_send_document_via_upload", chat_id=chat_id, error=str(e))
+                raise
+        
+        # Fallback: отправка текста с упоминанием документа
+        text = caption or "[Документ]"
+        if caption:
+            text = f"[Документ]\n{caption}"
+        else:
+            text = "[Документ]"
+        
+        data = {
+            "text": text
+        }
+        if parse_mode:
+            # MAX API использует "format" вместо "parse_mode"
+            data["format"] = parse_mode
+        
+        try:
+            await max_api_limiter.wait_if_needed(f"max_api_{chat_id}")
+            response = await retry_with_backoff(
+                self.client.post,
+                f"/messages?chat_id={chat_id_value}",
+                json=data
+            )
+            response.raise_for_status()
+            result = response.json()
+            logger.info("document_fallback_sent", chat_id=chat_id, message_id=result.get("message_id"))
+            return result
+        except httpx.HTTPStatusError as e:
+            error_response = None
+            try:
+                if e.response:
+                    error_response = e.response.json()
+                    logger.error(
+                        "failed_to_send_document",
+                        chat_id=chat_id,
+                        status_code=e.response.status_code,
+                        error_response=error_response
+                    )
+            except:
+                error_response = e.response.text if e.response else None
+                logger.error(
+                    "failed_to_send_document",
+                    chat_id=chat_id,
+                    status_code=e.response.status_code if e.response else None,
+                    error_response=error_response
+                )
+            raise APIError(
+                f"HTTP ошибка при отправке документа: {e.response.status_code}",
+                status_code=e.response.status_code,
+                response=error_response
+            )
+        except httpx.RequestError as e:
+            logger.error("failed_to_send_document", chat_id=chat_id, error=str(e))
+            raise APIError(f"Ошибка сети при отправке документа: {e}")
+        except Exception as e:
+            logger.error("failed_to_send_document", chat_id=chat_id, error=str(e))
+            raise APIError(f"Неожиданная ошибка при отправке документа: {e}")
+    
+    async def send_sticker(
+        self,
+        chat_id: str,
+        sticker_url: str,
+        local_file_path: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Отправить стикер в канал.
+        
+        Args:
+            chat_id: ID канала в MAX
+            sticker_url: URL стикера (для fallback)
+            local_file_path: Путь к локальному файлу стикера
+        
+        Returns:
+            Информация об отправленном сообщении
+        """
+        chat_id_value = convert_chat_id(chat_id)
+        
+        # ВАЖНО: MAX API требует загрузку файла через /uploads endpoint
+        # Сначала загружаем файл, получаем token, затем используем его в attachments
+        # Стикеры могут быть в формате WebP (статичные) или TGS (анимированные)
+        # TGS файлы MAX API не поддерживает как изображения, поэтому отправляем fallback
+        if local_file_path:
+            # Проверяем расширение файла
+            import os
+            file_ext = os.path.splitext(local_file_path)[1].lower()
+            
+            # Если это TGS файл (анимированный стикер), MAX API не поддерживает его
+            # Выбрасываем исключение, чтобы пост был пропущен
+            if file_ext == '.tgs':
+                logger.warning("tgs_sticker_not_supported_skipping", file_path=local_file_path, chat_id=chat_id)
+                raise APIError("TGS стикеры (анимированные) не поддерживаются MAX API")
+            
+            # Для WebP стикеров пытаемся загрузить как изображение
+            try:
+                token = await self.upload_file(local_file_path, "image")
+                
+                # Задержка для обработки стикера
+                await asyncio.sleep(settings.media_processing_delay)
+                
+                # Формируем запрос с attachments и payload.token
+                # MAX API использует "image" как attachment type для стикеров
+                data = {
+                    "text": "",  # Пустая строка для стикеров
+                    "attachments": [{
+                        "type": "image",
+                        "payload": {
+                            "token": token
+                        }
+                    }]
+                }
+                
+                await max_api_limiter.wait_if_needed(f"max_api_{chat_id}")
+                
+                # Пробуем отправить с повторными попытками при ошибке attachment.not.ready
+                max_retries = 5
+                retry_delay = 2
+                
+                for attempt in range(max_retries):
+                    try:
+                        response = await retry_with_backoff(
+                            self.client.post,
+                            f"/messages?chat_id={chat_id_value}",
+                            json=data
+                        )
+                        response.raise_for_status()
+                        result = response.json()
+                        
+                        # Проверяем на ошибку attachment.not.ready
+                        if 'error' in result or 'errors' in result:
+                            error_msg = str(result.get('error', result.get('errors', '')))
+                            if 'attachment.not.ready' in error_msg.lower() or 'not.ready' in error_msg.lower():
+                                if attempt < max_retries - 1:
+                                    logger.warning(f"sticker_attachment_not_ready_retry", attempt=attempt+1, delay=retry_delay)
+                                    await asyncio.sleep(retry_delay)
+                                    retry_delay *= 2
+                                    continue
+                        
+                        logger.info("sticker_sent", chat_id=chat_id, message_id=result.get("message_id"), result=result)
+                        return result
+                    except httpx.HTTPStatusError as e:
+                        if e.response:
+                            try:
+                                error_data = e.response.json()
+                                error_msg = str(error_data)
+                                if 'attachment.not.ready' in error_msg.lower() or 'not.ready' in error_msg.lower():
+                                    if attempt < max_retries - 1:
+                                        logger.warning(f"sticker_attachment_not_ready_retry", attempt=attempt+1, delay=retry_delay)
+                                        await asyncio.sleep(retry_delay)
+                                        retry_delay *= 2
+                                        continue
+                            except:
+                                pass
+                        if attempt == max_retries - 1:
+                            raise
+                    except Exception as e:
+                        if attempt == max_retries - 1:
+                            raise
+                        logger.warning(f"sticker_retry_after_error", attempt=attempt+1, error=str(e))
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2
+                
+            except Exception as e:
+                logger.error("failed_to_send_sticker_via_upload", chat_id=chat_id, error=str(e))
+                raise
+        
+        # Fallback: отправка текста с упоминанием стикера
+        text = "[Стикер]"
+        data = {
+            "text": text
+        }
+        
+        try:
+            await max_api_limiter.wait_if_needed(f"max_api_{chat_id}")
+            response = await retry_with_backoff(
+                self.client.post,
+                f"/messages?chat_id={chat_id_value}",
+                json=data
+            )
+            response.raise_for_status()
+            result = response.json()
+            logger.info("sticker_fallback_sent", chat_id=chat_id, message_id=result.get("message_id"))
+            return result
+        except httpx.HTTPStatusError as e:
+            error_response = None
+            try:
+                if e.response:
+                    error_response = e.response.json()
+                    logger.error(
+                        "failed_to_send_sticker",
+                        chat_id=chat_id,
+                        status_code=e.response.status_code,
+                        error_response=error_response
+                    )
+            except:
+                error_response = e.response.text if e.response else None
+                logger.error(
+                    "failed_to_send_sticker",
+                    chat_id=chat_id,
+                    status_code=e.response.status_code if e.response else None,
+                    error_response=error_response
+                )
+            raise APIError(
+                f"HTTP ошибка при отправке стикера: {e.response.status_code}",
+                status_code=e.response.status_code,
+                response=error_response
+            )
+        except httpx.RequestError as e:
+            logger.error("failed_to_send_sticker", chat_id=chat_id, error=str(e))
+            raise APIError(f"Ошибка сети при отправке стикера: {e}")
+        except Exception as e:
+            logger.error("failed_to_send_sticker", chat_id=chat_id, error=str(e))
+            raise APIError(f"Неожиданная ошибка при отправке стикера: {e}")
+    
     async def send_photos(
         self,
         chat_id: str,
