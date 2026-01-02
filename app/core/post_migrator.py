@@ -12,6 +12,7 @@ from pyrogram.types import Message as PyrogramMessage
 from app.models.crossposting_link import CrosspostingLink
 from app.models.message_log import MessageLog
 from app.core.message_processor import MessageProcessor
+from app.core.migration_queue import migration_queue
 from app.utils.logger import get_logger
 from app.utils.enums import MessageStatus
 from config.database import async_session_maker
@@ -69,13 +70,13 @@ class PostMigrator:
             # Получаем информацию о связи
             async with async_session_maker() as session:
                 result = await session.execute(
-                select(CrosspostingLink)
-                .options(
-                    selectinload(CrosspostingLink.telegram_channel),
-                    selectinload(CrosspostingLink.max_channel)
+                    select(CrosspostingLink)
+                    .options(
+                        selectinload(CrosspostingLink.telegram_channel),
+                        selectinload(CrosspostingLink.max_channel)
+                    )
+                    .where(CrosspostingLink.id == link_id)
                 )
-                .where(CrosspostingLink.id == link_id)
-            )
                 link = result.scalar_one_or_none()
                 
                 if not link:
@@ -146,7 +147,7 @@ class PostMigrator:
             
             logger.info(
                 "messages_grouped",
-                link_id=link_id,
+                           link_id=link_id,
                 total_messages=len(all_messages),
                 total_posts=stats["total"],
                 media_groups=len(grouped_messages),
@@ -197,6 +198,11 @@ class PostMigrator:
             last_progress_update = start_time
             
             for item in items_to_process_sorted:
+                # КРИТИЧНО: Проверяем, не была ли миграция остановлена
+                if not await migration_queue.is_migrating(link_id):
+                    logger.info("migration_stopped_by_user", link_id=link_id, processed=processed_count, total=len(items_to_process_sorted))
+                    break
+                
                 if item["type"] == "media_group":
                     # Обработка медиа-группы
                     group = item["group"]
@@ -289,7 +295,7 @@ class PostMigrator:
             
             logger.info(
                 "migration_completed",
-                link_id=link_id,
+                                               link_id=link_id,
                 total_posts=stats["total"],
                 success_posts=stats["success"],
                 skipped_posts=stats["skipped"],
@@ -361,7 +367,7 @@ class PostMigrator:
                                 
                                 logger.info(
                                     "crossposting_resumed_after_migration",
-                                    link_id=link_id,
+                                             link_id=link_id,
                                     telegram_channel_db_id=telegram_channel_db_id,
                                     is_enabled=link.is_enabled,
                                     cache_key=cache_key,
@@ -373,7 +379,7 @@ class PostMigrator:
                                 if final_cache_check:
                                     logger.info(
                                         "cache_verified_after_migration",
-                                        link_id=link_id,
+                                               link_id=link_id,
                                         cache_key=cache_key,
                                         cached_link_ids=final_cache_check,
                                         mtproto_receiver_should_work=True
@@ -406,8 +412,8 @@ class PostMigrator:
                                 except Exception as e:
                                     logger.error(
                                         "failed_to_restart_mtproto_receiver",
-                                        link_id=link_id,
-                                        error=str(e),
+                                               link_id=link_id,
+                                               error=str(e),
                                         exc_info=True
                                     )
                             else:
