@@ -257,6 +257,12 @@ class MaxAPIClient:
                         
                         if not token:
                             logger.error("upload_result_structure", upload_result=upload_result)
+                            # Проверяем, является ли это ошибкой неподдерживаемого формата
+                            error_code = upload_result.get('error_code', '')
+                            error_data = upload_result.get('error_data', '')
+                            error_msg = upload_result.get('error_msg', '')
+                            if 'image_invalid_format' in str(error_code).lower() or 'image_invalid_format' in str(error_data).lower() or 'image_invalid_format' in str(error_msg).lower():
+                                raise APIError("IMAGE_INVALID_FORMAT: Стикер не поддерживается MAX API", response=upload_result)
                             raise APIError("Не получен token после загрузки файла", response=upload_result)
                     
                     logger.info("file_uploaded", file_path=file_path, token=token[:20])
@@ -799,7 +805,29 @@ class MaxAPIClient:
             
             # Для WebP стикеров пытаемся загрузить как изображение
             try:
-                token = await self.upload_file(local_file_path, "image")
+                try:
+                    token = await self.upload_file(local_file_path, "image")
+                except APIError as upload_error:
+                    # Проверяем, является ли это ошибкой неподдерживаемого формата
+                    error_msg = str(upload_error).lower()
+                    upload_response = getattr(upload_error, 'response', None)
+                    if upload_response:
+                        try:
+                            error_data = upload_response if isinstance(upload_response, dict) else upload_response
+                            if isinstance(error_data, dict):
+                                error_code = error_data.get('error_code', '')
+                                error_data_content = error_data.get('error_data', '')
+                                if 'image_invalid_format' in error_code.lower() or 'image_invalid_format' in str(error_data_content).lower():
+                                    logger.warning("sticker_format_not_supported", file_path=local_file_path, chat_id=chat_id, error_code=error_code)
+                                    raise APIError("Стикер не поддерживается: IMAGE_INVALID_FORMAT")
+                        except:
+                            pass
+                    # Если ошибка содержит информацию о неподдерживаемом формате
+                    if 'image_invalid_format' in error_msg or 'invalid format' in error_msg:
+                        logger.warning("sticker_format_not_supported", file_path=local_file_path, chat_id=chat_id, error=str(upload_error))
+                        raise APIError("Стикер не поддерживается: неподдерживаемый формат изображения")
+                    # Пробрасываем другие ошибки
+                    raise
                 
                 # Задержка для обработки стикера
                 await asyncio.sleep(settings.media_processing_delay)

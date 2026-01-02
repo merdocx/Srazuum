@@ -250,10 +250,10 @@ class MessageProcessor:
                             error_msg = str(e)
                             processing_time = int((datetime.utcnow() - link_start_time).total_seconds() * 1000)
                             
-                            # Проверяем, является ли это ошибкой неподдерживаемого формата (TGS стикеры и т.д.)
+                            # Проверяем, является ли это ошибкой неподдерживаемого формата (TGS стикеры, IMAGE_INVALID_FORMAT и т.д.)
                             # В таком случае просто пропускаем пост, не создавая запись об ошибке
                             error_lower = error_msg.lower()
-                            if any(keyword in error_lower for keyword in ['tgs', 'не поддерживается', 'not supported', 'стикер не поддерживается']):
+                            if any(keyword in error_lower for keyword in ['tgs', 'не поддерживается', 'not supported', 'стикер не поддерживается', 'image_invalid_format', 'invalid format', 'не получен token']):
                                 logger.info("message_skipped_unsupported_format", link_id=link.id, telegram_message_id=telegram_message_id, error=error_msg)
                                 # Удаляем запись из лога, так как пост пропускается
                                 try:
@@ -604,9 +604,9 @@ class MessageProcessor:
                             logger.warning("failed_to_delete_sticker_after_send", file_path=local_file_path, error=str(delete_error))
                     return result
                 except APIError as e:
-                    # Для TGS стикеров и других неподдерживаемых форматов - пропускаем
+                    # Для TGS стикеров, IMAGE_INVALID_FORMAT и других неподдерживаемых форматов - пропускаем
                     error_msg = str(e).lower()
-                    if 'tgs' in error_msg or 'не поддерживается' in error_msg or 'not supported' in error_msg:
+                    if any(keyword in error_msg for keyword in ['tgs', 'не поддерживается', 'not supported', 'image_invalid_format', 'invalid format']):
                         logger.info("sticker_not_supported_skipping", error=str(e), sticker_url=sticker_url, chat_id=max_channel_id)
                         # Удаляем файл
                         if local_file_path:
