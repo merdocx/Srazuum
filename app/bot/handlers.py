@@ -121,6 +121,113 @@ async def log_audit(user_id: int, action: str, entity_type: str, entity_id: int,
         await session.commit()
 
 
+# КРИТИЧНО: Обработчики для состояния confirming_delete должны быть зарегистрированы ПЕРВЫМИ
+# и использовать специфичные фильтры для приоритета
+@router.message(LinkManagementStates.confirming_delete, F.text == "✅ Да, удалить")
+async def message_delete_yes_handler(message: Message, state: FSMContext):
+    """Обработчик кнопки 'Да, удалить' в состоянии confirming_delete."""
+    data = await state.get_data()
+    link_id = data.get("delete_link_id")
+    
+    logger.info(
+        "delete_yes_handler_called",
+        user_id=message.from_user.id,
+        message_text=message.text,
+        link_id=link_id,
+        state_data=data
+    )
+    
+    if link_id:
+        await _process_delete_yes(message, state, link_id)
+    else:
+        await message.answer("Ошибка: не найдена связь для удаления.")
+        await state.clear()
+
+
+@router.message(LinkManagementStates.confirming_delete, F.text == "❌ Отмена")
+async def message_delete_cancel_handler(message: Message, state: FSMContext):
+    """Обработчик кнопки 'Отмена' в состоянии confirming_delete."""
+    data = await state.get_data()
+    link_id = data.get("delete_link_id")
+    
+    logger.info(
+        "delete_cancel_handler_called",
+        user_id=message.from_user.id,
+        message_text=message.text,
+        link_id=link_id
+    )
+    
+    await _process_delete_cancel(message, state, link_id)
+
+
+
+
+
+
+async def _process_delete_yes(message: Message, state: FSMContext, link_id: int):
+    """Внутренняя функция для обработки подтвержденного удаления связи."""
+    logger.info("delete_yes_processing", user_id=message.from_user.id, link_id=link_id)
+    
+    if not link_id:
+        await message.answer("Ошибка: не найдена связь для удаления.")
+        await state.clear()
+        return
+    
+    user = await get_or_create_user(message.from_user.id, message.from_user.username)
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(CrosspostingLink)
+            .options(
+                selectinload(CrosspostingLink.telegram_channel)
+            )
+            .where(CrosspostingLink.id == link_id)
+            .where(CrosspostingLink.user_id == user.id)
+        )
+        link = result.scalar_one_or_none()
+        
+        if not link:
+            await message.answer("Связь не найдена.")
+            await state.clear()
+            return
+        
+        # КРИТИЧНО: Сохраняем channel_id перед удалением для очистки кэша
+        telegram_channel_id_for_cache = None
+        if link.telegram_channel:
+            telegram_channel_id_for_cache = link.telegram_channel.channel_id
+        
+        await session.delete(link)
+        await session.commit()
+        
+        # КРИТИЧНО: Очищаем кэш для канала при удалении связи
+        if telegram_channel_id_for_cache:
+            cache_key = f"channel_links:{telegram_channel_id_for_cache}"
+            await delete_cache(cache_key)
+            logger.info("cache_cleared_on_link_delete", channel_id=telegram_channel_id_for_cache, link_id=link_id)
+        
+        await log_audit(user.id, AuditAction.DELETE_LINK.value, "crossposting_link", link_id)
+        
+        text = f"🗑️ Связь #{link_id} удалена."
+        keyboard = get_back_to_menu_keyboard()
+        await message.answer(text, reply_markup=keyboard)
+        await state.clear()
+        logger.info("link_deleted", link_id=link_id, user_id=user.id)
+
+
+async def _process_delete_cancel(message: Message, state: FSMContext, link_id: int):
+    """Внутренняя функция для обработки отмены удаления."""
+    logger.info("delete_cancel_processing", user_id=message.from_user.id, link_id=link_id)
+    
+    if link_id:
+        # Возвращаемся к деталям связи
+        await show_link_detail(message, state, link_id)
+    else:
+        # Если link_id не найден, возвращаемся к списку
+        data = await state.get_data()
+        current_page = data.get("channels_list_page", 0)
+        await show_channels_list(message, state, page=current_page)
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     """Обработчик команды /start."""
@@ -857,6 +964,7 @@ async def show_channels_list(message: Message, state: FSMContext = None, page: i
         keyboard = get_channels_list_keyboard(links_data, page=page)
         
         if state:
+            await state.set_state(LinkManagementStates.viewing_channels_list)
             await state.update_data(
                 channels_list_page=page, 
                 links_data=links_data,
@@ -939,7 +1047,7 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
         
         status_icon = "✅" if link.is_enabled else "❌"
         text = (
-            f"{status_icon} Связь #{link.id}\n\n"
+            f"{status_icon} Связь {link.telegram_channel.channel_title} - {link.max_channel.channel_title}\n\n"
             f"Telegram: {link.telegram_channel.channel_title}\n"
             f"MAX: {link.max_channel.channel_title}\n"
             f"Статус: {'Активна' if link.is_enabled else 'Неактивна'}\n"
@@ -959,11 +1067,21 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
         logger.info("link_detail_shown", link_id=link_id, user_id=user.id)
 
 
-@router.message(F.text.startswith("✅") | F.text.startswith("❌"))
+@router.message(
+    LinkManagementStates.viewing_channels_list,
+    F.text.startswith("✅") | F.text.startswith("❌")
+)
 async def message_link_selected(message: Message, state: FSMContext):
     """Обработчик выбора связи из списка."""
+    logger.info(
+        "message_link_selected_called",
+        user_id=message.from_user.id,
+        message_text=message.text
+    )
+    
     # Проверяем, что текст содержит " - " (формат кнопки связи)
     if not message.text or " - " not in message.text:
+        logger.info("message_link_selected_skipped_no_dash", user_id=message.from_user.id, message_text=message.text)
         return
     
     data = await state.get_data()
@@ -1338,7 +1456,8 @@ async def message_enable(message: Message, state: FSMContext):
         # Обновляем сообщение
         status_icon = "✅"
         text = (
-            f"{status_icon} Связь #{link.id}\n\n"
+            f"{status_icon} Связь {link.telegram_channel.channel_title} - {link.max_channel.channel_title}\n\n"
+            f"✅ Кросспостинг включен\n\n"
             f"Telegram: {link.telegram_channel.channel_title}\n"
             f"MAX: {link.max_channel.channel_title}\n"
             f"Статус: Активна\n"
@@ -1346,7 +1465,7 @@ async def message_enable(message: Message, state: FSMContext):
         )
         
         keyboard = get_link_detail_keyboard(link_id, True)
-        await message.answer("✅ Кросспостинг включен\n\n" + text, reply_markup=keyboard)
+        await message.answer(text, reply_markup=keyboard)
         logger.info("link_enabled", link_id=link_id, user_id=user.id)
 
 
@@ -1401,7 +1520,8 @@ async def message_disable(message: Message, state: FSMContext):
         # Обновляем сообщение
         status_icon = "❌"
         text = (
-            f"{status_icon} Связь #{link.id}\n\n"
+            f"{status_icon} Связь {link.telegram_channel.channel_title} - {link.max_channel.channel_title}\n\n"
+            f"❌ Кросспостинг отключен\n\n"
             f"Telegram: {link.telegram_channel.channel_title}\n"
             f"MAX: {link.max_channel.channel_title}\n"
             f"Статус: Неактивна\n"
@@ -1409,7 +1529,7 @@ async def message_disable(message: Message, state: FSMContext):
         )
         
         keyboard = get_link_detail_keyboard(link_id, False)
-        await message.answer("❌ Кросспостинг отключен\n\n" + text, reply_markup=keyboard)
+        await message.answer(text, reply_markup=keyboard)
         logger.info("link_disabled", link_id=link_id, user_id=user.id)
 
 
@@ -1418,6 +1538,8 @@ async def message_delete_confirm(message: Message, state: FSMContext):
     """Обработчик кнопки подтверждения удаления."""
     data = await state.get_data()
     link_id = data.get("current_link_id")
+    
+    logger.info("delete_confirm_clicked", user_id=message.from_user.id, link_id=link_id)
     
     if not link_id:
         await message.answer("Ошибка: не найдена текущая связь.")
@@ -1444,6 +1566,18 @@ async def message_delete_confirm(message: Message, state: FSMContext):
         await state.update_data(delete_link_id=link_id)
         await state.set_state(LinkManagementStates.confirming_delete)
         
+        # Проверяем, что состояние установлено
+        verify_state = await state.get_state()
+        verify_data = await state.get_data()
+        logger.info(
+            "delete_confirm_state_set",
+            user_id=user.id,
+            link_id=link_id,
+            state_set=str(verify_state),
+            expected_state=str(LinkManagementStates.confirming_delete),
+            state_data=verify_data
+        )
+        
         text = (
             f"⚠️ Подтвердите удаление связи #{link_id}\n\n"
             f"Telegram: {link.telegram_channel.channel_title}\n"
@@ -1453,13 +1587,15 @@ async def message_delete_confirm(message: Message, state: FSMContext):
         
         keyboard = get_delete_confirm_keyboard(link_id)
         await message.answer(text, reply_markup=keyboard)
+        logger.info("delete_confirm_shown", user_id=user.id, link_id=link_id)
 
 
-@router.message(LinkManagementStates.confirming_delete, F.text == "✅ Да, удалить")
 async def message_delete_yes(message: Message, state: FSMContext):
     """Обработчик подтвержденного удаления связи."""
     data = await state.get_data()
     link_id = data.get("delete_link_id")
+    
+    logger.info("delete_yes_clicked", user_id=message.from_user.id, link_id=link_id, state_data=data)
     
     if not link_id:
         await message.answer("Ошибка: не найдена связь для удаления.")
@@ -1503,6 +1639,22 @@ async def message_delete_yes(message: Message, state: FSMContext):
         await message.answer(text, reply_markup=keyboard)
         await state.clear()
         logger.info("link_deleted", link_id=link_id, user_id=user.id)
+
+
+async def message_delete_cancel(message: Message, state: FSMContext):
+    """Обработчик кнопки 'Отмена' при подтверждении удаления."""
+    data = await state.get_data()
+    link_id = data.get("delete_link_id")
+    
+    logger.info("delete_cancelled", user_id=message.from_user.id, link_id=link_id)
+    
+    if link_id:
+        # Возвращаемся к деталям связи
+        await show_link_detail(message, state, link_id)
+    else:
+        # Если link_id не найден, возвращаемся к списку
+        current_page = data.get("channels_list_page", 0)
+        await show_channels_list(message, state, page=current_page)
 
 
 @router.message(LinkManagementStates.viewing_link_detail, F.text == "🔙 Назад к списку")
