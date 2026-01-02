@@ -185,8 +185,8 @@ class PostMigrator:
                 key=lambda item: item["date"]
             )
             
-            # ОГРАНИЧЕНИЕ: Берем только последние 50 постов
-            MAX_POSTS_TO_MIGRATE = 50
+            # ОГРАНИЧЕНИЕ: Берем только последние 30 постов
+            MAX_POSTS_TO_MIGRATE = 30
             if len(items_to_process_sorted) > MAX_POSTS_TO_MIGRATE:
                 items_to_process_sorted = items_to_process_sorted[-MAX_POSTS_TO_MIGRATE:]
                 logger.info(

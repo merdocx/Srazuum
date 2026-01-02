@@ -1,6 +1,7 @@
 """Клиент для работы с MAX API."""
 import asyncio
 import httpx
+import json
 from typing import Optional, Dict, Any, List
 from config.settings import settings
 from app.utils.logger import get_logger
@@ -513,7 +514,14 @@ class MaxAPIClient:
                             json=data
                         )
                         response.raise_for_status()
-                        result = response.json()
+                        try:
+                            result = response.json()
+                        except (json.JSONDecodeError, ValueError) as json_error:
+                            # Если ответ не JSON (пустой или невалидный), это может быть ошибка MAX API
+                            # Логируем и пробрасываем как APIError для правильной обработки
+                            response_text = response.text[:500] if hasattr(response, 'text') else "Empty response"
+                            logger.error("invalid_json_response_for_video", chat_id=chat_id, status_code=response.status_code, response_text=response_text, error=str(json_error))
+                            raise APIError(f"MAX API вернул невалидный ответ при отправке видео: {str(json_error)}")
                         
                         # Проверяем на ошибку attachment.not.ready
                         if 'error' in result or 'errors' in result:

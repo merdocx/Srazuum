@@ -218,15 +218,26 @@ class MessageProcessor:
                             
                             # Используем circuit breaker с таймаутом
                             try:
-                                max_message = await asyncio.wait_for(
+                                # Создаем задачу для возможности отмены при таймауте
+                                send_task = asyncio.create_task(
                                     max_api_circuit_breaker.call(
                                         self._send_to_max,
                                         link,
                                         message_data
-                                    ),
+                                    )
+                                )
+                                max_message = await asyncio.wait_for(
+                                    send_task,
                                     timeout=settings.max_api_timeout
                                 )
                             except asyncio.TimeoutError:
+                                # Отменяем задачу при таймауте
+                                if not send_task.done():
+                                    send_task.cancel()
+                                    try:
+                                        await send_task
+                                    except asyncio.CancelledError:
+                                        pass
                                 raise APIError(f"Таймаут при отправке в MAX API (>{settings.max_api_timeout}с)")
                             
                             processing_time = int((datetime.utcnow() - link_start_time).total_seconds() * 1000)
@@ -253,7 +264,7 @@ class MessageProcessor:
                             # Проверяем, является ли это ошибкой неподдерживаемого формата (TGS стикеры, IMAGE_INVALID_FORMAT и т.д.)
                             # В таком случае просто пропускаем пост, не создавая запись об ошибке
                             error_lower = error_msg.lower()
-                            if any(keyword in error_lower for keyword in ['tgs', 'не поддерживается', 'not supported', 'стикер не поддерживается', 'image_invalid_format', 'invalid format', 'не получен token']):
+                            if any(keyword in error_lower for keyword in ['tgs', 'не поддерживается', 'not supported', 'стикер не поддерживается', 'image_invalid_format', 'invalid format', 'не получен token', 'expecting value', 'jsondecodeerror', 'невалидный ответ']):
                                 logger.info("message_skipped_unsupported_format", link_id=link.id, telegram_message_id=telegram_message_id, error=error_msg)
                                 # Удаляем запись из лога, так как пост пропускается
                                 try:
@@ -650,6 +661,9 @@ class MessageProcessor:
             )
         except httpx.RequestError as e:
             raise APIError(f"Ошибка сети при отправке в MAX: {e}")
+        except APIError:
+            # Если это уже APIError, пробрасываем как есть (не оборачиваем)
+            raise
         except Exception as e:
             raise APIError(f"Неожиданная ошибка при отправке в MAX: {e}")
     
