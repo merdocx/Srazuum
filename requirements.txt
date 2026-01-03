@@ -38,4 +38,5 @@ aiosqlite==0.19.0  # для тестовой БД
 
 # System monitoring
 psutil==5.9.6
+yookassa==3.0.0
 

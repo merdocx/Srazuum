@@ -3,7 +3,7 @@
 import asyncio
 import re
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
@@ -39,6 +39,7 @@ from app.bot.keyboards import (
 from config.database import async_session_maker
 from config.settings import settings
 from app.utils.cache import delete_cache
+from app.payments.yookassa_client import create_payment
 
 logger = get_logger(__name__)
 router = Router()
@@ -839,8 +840,44 @@ async def process_max_channel(message: Message, state: FSMContext):
                 logger.error("telegram_channel_not_found_in_db", telegram_channel_id=telegram_channel_id)
                 return
 
+            # Проверяем, является ли это первой связью пользователя
+            from datetime import datetime, timedelta
+            
+            links_count_result = await session.execute(
+                select(func.count(CrosspostingLink.id)).where(CrosspostingLink.user_id == user.id)
+            )
+            links_count = links_count_result.scalar() or 0
+            is_first_link = links_count == 0
+            
+            # Определяем статус подписки в зависимости от VIP статуса и номера связи
+            if user.is_vip:
+                # VIP пользователи - все связи бесплатные
+                subscription_status = 'vip'
+                free_trial_end_date = None
+                subscription_end_date = None
+                is_enabled = True
+            elif is_first_link:
+                # Первая связь - бесплатный период 30 дней
+                subscription_status = 'free_trial'
+                free_trial_end_date = datetime.utcnow() + timedelta(days=30)
+                subscription_end_date = None
+                is_enabled = True
+            else:
+                # Последующие связи - требуют оплаты
+                subscription_status = 'expired'
+                free_trial_end_date = None
+                subscription_end_date = None
+                is_enabled = False  # Неактивна до оплаты
+            
             crossposting_link = CrosspostingLink(
-                user_id=user.id, telegram_channel_id=telegram_channel_id, max_channel_id=max_channel.id, is_enabled=True
+                user_id=user.id,
+                telegram_channel_id=telegram_channel_id,
+                max_channel_id=max_channel.id,
+                is_enabled=is_enabled,
+                subscription_status=subscription_status,
+                free_trial_end_date=free_trial_end_date,
+                subscription_end_date=subscription_end_date,
+                is_first_link=is_first_link
             )
             session.add(crossposting_link)
             await session.commit()
@@ -863,16 +900,82 @@ async def process_max_channel(message: Message, state: FSMContext):
                 {"telegram_channel_id": telegram_channel_id, "max_channel_id": max_channel.id},
             )
 
-            await message.answer(
-                f"✅ Связь создана успешно!\n\n" f"Кросспостинг активирован.", reply_markup=get_main_keyboard()
-            )
+            # Формируем сообщение в зависимости от статуса подписки
+            if user.is_vip:
+                # VIP пользователи
+                await message.answer(
+                    f"✅ Связь создана успешно! ⭐ VIP\n\n"
+                    f"Telegram: {telegram_channel.channel_username or telegram_channel.channel_title}\n"
+                    f"MAX: {max_channel.channel_username or max_channel.channel_title}\n\n"
+                    f"Кросспостинг активирован.",
+                    reply_markup=get_main_keyboard()
+                )
+            elif is_first_link:
+                # Первая связь - бесплатный период
+                free_trial_end = free_trial_end_date.strftime("%d.%m.%Y %H:%M") if free_trial_end_date else "N/A"
+                await message.answer(
+                    f"✅ Связь создана успешно!\n\n"
+                    f"Telegram: {telegram_channel.channel_username or telegram_channel.channel_title}\n"
+                    f"MAX: {max_channel.channel_username or max_channel.channel_title}\n\n"
+                    f"📅 Бесплатный период: до {free_trial_end}\n"
+                    f"Кросспостинг активирован.",
+                    reply_markup=get_main_keyboard()
+                )
+            else:
+                # Последующие связи - требуют оплаты
+                # Создаем платеж в YooKassa
+                import concurrent.futures
+                
+                try:
+                    loop = asyncio.get_event_loop()
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        payment_info = await loop.run_in_executor(
+                            executor,
+                            create_payment,
+                            crossposting_link.id,
+                            user.id
+                        )
+                    
+                    # Сохраняем информацию о платеже
+                    crossposting_link.yookassa_payment_id = payment_info["payment_id"]
+                    crossposting_link.payment_status = "pending"
+                    await session.commit()
+                    
+                    # Отправляем сообщение с ссылкой на оплату
+                    payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="💳 Оплатить подписку", url=payment_info["confirmation_url"])]
+                    ])
+                    
+                    await message.answer(
+                        f"📊 Связь создана\n\n"
+                        f"Telegram: {telegram_channel.channel_username or telegram_channel.channel_title}\n"
+                        f"MAX: {max_channel.channel_username or max_channel.channel_title}\n\n"
+                        f"⚠️ Для активации связи требуется оплата подписки.\n\n"
+                        f"Сумма: {payment_info['amount']:.0f} ₽\n"
+                        f"Период: 30 дней\n\n"
+                        f"После оплаты связь будет активирована на 30 дней.",
+                        reply_markup=payment_keyboard
+                    )
+                except Exception as e:
+                    logger.error("payment_creation_error", error=str(e), link_id=crossposting_link.id, user_id=user.id)
+                    await message.answer(
+                        f"📊 Связь создана\n\n"
+                        f"Telegram: {telegram_channel.channel_username or telegram_channel.channel_title}\n"
+                        f"MAX: {max_channel.channel_username or max_channel.channel_title}\n\n"
+                        f"⚠️ Для активации связи требуется оплата подписки.\n\n"
+                        f"Сумма: 200 ₽\n"
+                        f"Период: 30 дней\n\n"
+                        f"❌ Ошибка при создании платежа. Попробуйте позже через команду /pay_link {crossposting_link.id}",
+                        reply_markup=get_main_keyboard()
+                    )
 
-            # Отправляем предложение миграции
-            migration_text = (
-                "Перед началом работы вы можете один раз перенести последние 30 постов из Telegram-канала в MAX-канал."
-            )
-            migration_keyboard = get_migration_offer_keyboard(crossposting_link.id)
-            await message.answer(migration_text, reply_markup=migration_keyboard)
+            # Отправляем предложение миграции только для активных связей
+            if is_enabled:
+                migration_text = (
+                    "Перед началом работы вы можете один раз перенести последние 30 постов из Telegram-канала в MAX-канал."
+                )
+                migration_keyboard = get_migration_offer_keyboard(crossposting_link.id)
+                await message.answer(migration_text, reply_markup=migration_keyboard)
 
             logger.info("crossposting_link_created", link_id=crossposting_link.id, user_id=user.id)
         except Exception as e:

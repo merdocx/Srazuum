@@ -7,6 +7,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config.settings import settings
 from app.utils.logger import setup_logging, get_logger
 from app.bot.handlers import router, set_bot_instance
+from app.bot.handlers_payments import router as payments_router
 
 # Импортируем handlers_migration для регистрации обработчиков
 import app.bot.handlers_migration
@@ -44,7 +45,12 @@ async def main():
     # Регистрация роутеров
     # Обработчики миграции уже зарегистрированы в том же router через импорт
     dp.include_router(router)
-
+    dp.include_router(payments_router)
+    
+    # Запускаем фоновые задачи для подписок
+    from app.payments.subscription_tasks import subscription_tasks_worker
+    asyncio.create_task(subscription_tasks_worker(interval_seconds=300, bot_instance=bot_instance))
+    
     logger.info("bot_starting", bot_token=settings.telegram_bot_token[:10] + "...")
 
     try:

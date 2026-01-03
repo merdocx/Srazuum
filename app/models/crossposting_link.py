@@ -1,8 +1,9 @@
 """Модель связи кросспостинга."""
 
-from sqlalchemy import Column, BigInteger, DateTime, Boolean, ForeignKey, Index, UniqueConstraint
+from sqlalchemy import Column, BigInteger, DateTime, Boolean, ForeignKey, Index, UniqueConstraint, String
 from sqlalchemy.orm import relationship
 from datetime import datetime
+from typing import Optional
 from config.database import Base
 
 
@@ -18,6 +19,17 @@ class CrosspostingLink(Base):
     )
     max_channel_id = Column(BigInteger, ForeignKey("max_channels.id", ondelete="CASCADE"), nullable=False, index=True)
     is_enabled = Column(Boolean, default=True, nullable=False, index=True)
+    
+    # Поля подписки
+    subscription_status = Column(String(50), default='free_trial', nullable=False, index=True)
+    free_trial_end_date = Column(DateTime, nullable=True)
+    subscription_end_date = Column(DateTime, nullable=True)
+    is_first_link = Column(Boolean, default=False, nullable=False)
+    last_payment_date = Column(DateTime, nullable=True)
+    payment_id = Column(String(255), nullable=True)
+    payment_status = Column(String(50), nullable=True)
+    yookassa_payment_id = Column(String(255), nullable=True)
+    
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -27,6 +39,7 @@ class CrosspostingLink(Base):
         Index("idx_telegram_channel", "telegram_channel_id"),
         Index("idx_max_channel", "max_channel_id"),
         Index("idx_is_enabled", "is_enabled"),
+        Index("idx_subscription_status", "subscription_status"),
     )
 
     # Relationships

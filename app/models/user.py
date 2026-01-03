@@ -1,6 +1,6 @@
 """Модель пользователя."""
 
-from sqlalchemy import Column, BigInteger, String, DateTime
+from sqlalchemy import Column, BigInteger, String, DateTime, Boolean
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from config.database import Base
@@ -14,6 +14,7 @@ class User(Base):
     id = Column(BigInteger, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, unique=True, nullable=False, index=True)
     telegram_username = Column(String, nullable=True)
+    is_vip = Column(Boolean, default=False, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

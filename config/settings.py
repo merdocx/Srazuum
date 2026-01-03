@@ -3,6 +3,7 @@ try:
     from pydantic_settings import BaseSettings
 except ImportError:
     from pydantic import BaseSettings
+from pydantic import Field
 from typing import Optional
 
 
@@ -85,6 +86,14 @@ class Settings(BaseSettings):
     
     # Кросспостинг
     crossposting_parallel_links: int = 20  # Параллельно обрабатывать 20 связей для кросспостинга
+    
+    # YooKassa settings
+    yookassa_shop_id: Optional[str] = Field(default=None, env="YOOKASSA_SHOP_ID")
+    yookassa_secret_key: Optional[str] = Field(default=None, env="YOOKASSA_SECRET_KEY")
+    yookassa_webhook_url: Optional[str] = Field(default=None, env="YOOKASSA_WEBHOOK_URL")
+    yookassa_return_url: Optional[str] = Field(default=None, env="YOOKASSA_RETURN_URL")
+    subscription_price: float = Field(default=200.0, env="SUBSCRIPTION_PRICE")  # Цена подписки в рублях
+    subscription_period_days: int = Field(default=30, env="SUBSCRIPTION_PERIOD_DAYS")  # Период подписки в днях
     
     class Config:
         env_file = ".env"
