@@ -104,5 +104,7 @@
 
 1. ✅ Сравнить PROJECT_ANALYSIS.md и PROJECT_REVIEW.md на дублирование
 2. ✅ Решить, нужны ли оба файла или можно объединить
-3. ✅ Обновить этот документ после принятия решений
+3. ✅ Удалены устаревшие файлы (2025-01-04)
+   - PROJECT_ANALYSIS.md удален
+   - admin_panel/backend/create_admin_script.py удален
 
