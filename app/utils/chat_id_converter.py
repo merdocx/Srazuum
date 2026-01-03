@@ -11,6 +11,9 @@ def convert_chat_id(chat_id: Union[str, int, float]) -> int:
     
     Returns:
         Преобразованное значение как int
+        
+    Raises:
+        ValueError: Если невозможно преобразовать значение в int
     """
     try:
         if isinstance(chat_id, str):
@@ -18,13 +21,16 @@ def convert_chat_id(chat_id: Union[str, int, float]) -> int:
             cleaned = chat_id.lstrip('-')
             if cleaned.replace('.', '').isdigit():
                 return int(float(chat_id))
-            return chat_id
+            return int(chat_id)
         elif isinstance(chat_id, (int, float)):
             return int(chat_id)
         else:
-            return chat_id
-    except (ValueError, TypeError):
-        return chat_id
+            return int(chat_id)
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Невозможно преобразовать chat_id в int: {chat_id}") from e
+
+
+
 
 
 

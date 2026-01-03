@@ -1,0 +1,33 @@
+# FastAPI и сервер
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# Аутентификация
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-decouple==3.8
+
+# База данных (используем существующие зависимости проекта)
+# SQLAlchemy, asyncpg уже установлены в основном проекте
+
+# CORS
+python-cors==1.0.0  # Если нужен, но обычно встроен в FastAPI
+
+# Валидация
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Redis (для кэширования, если нужно)
+# redis и aioredis уже установлены в основном проекте
+
+# Логирование
+structlog==23.2.0
+
+# WebSocket (встроен в FastAPI, но можно добавить)
+websockets==12.0
+
+# Утилиты
+python-dateutil==2.8.2
+psutil==5.9.6
+

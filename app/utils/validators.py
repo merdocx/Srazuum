@@ -10,7 +10,16 @@ class TelegramChannelInput(BaseModel):
     channel_title: str = Field(..., min_length=1, max_length=255)
     
     @validator('channel_username')
-    def validate_username(cls, v):
+    def validate_username(cls, v: Optional[str]) -> Optional[str]:
+        """
+        Валидировать и нормализовать username канала.
+        
+        Args:
+            v: Username (может содержать @ или нет)
+        
+        Returns:
+            Username без символа @
+        """
         if v and not v.startswith('@'):
             return v
         elif v:
@@ -39,6 +48,9 @@ class CrosspostingLinkInput(BaseModel):
     
     class Config:
         extra = "forbid"
+
+
+
 
 
 

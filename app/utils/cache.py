@@ -52,7 +52,7 @@ async def set_cache(key: str, value: Any, ttl: Optional[int] = None) -> None:
         # При ошибке Redis просто логируем, не прерываем работу
 
 
-async def delete_cache(key: str):
+async def delete_cache(key: str) -> None:
     """
     Удалить значение из кэша.
     

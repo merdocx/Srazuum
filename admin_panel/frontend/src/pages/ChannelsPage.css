@@ -1,0 +1,33 @@
+.channels-page {
+  padding: 20px;
+}
+
+.tabs {
+  display: flex;
+  gap: 0;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.tabs button {
+  padding: 8px 16px;
+  border: none;
+  background: white;
+  cursor: pointer;
+  border-right: 1px solid #ddd;
+}
+
+.tabs button:last-child {
+  border-right: none;
+}
+
+.tabs button.active {
+  background: #1976d2;
+  color: white;
+}
+
+.tabs button:hover:not(.active) {
+  background: #f5f5f5;
+}
+

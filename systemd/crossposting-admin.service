@@ -1,0 +1,25 @@
+[Unit]
+Description=Srazuum Admin Panel - Backend API
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/crossposting_service/admin_panel/backend
+Environment="PATH=/root/crossposting_service/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONPATH=/root/crossposting_service:/root/crossposting_service/admin_panel/backend"
+ExecStart=/bin/bash -c "cd /root/crossposting_service/admin_panel/backend && /root/crossposting_service/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8001"
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crossposting-admin
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+

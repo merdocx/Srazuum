@@ -103,7 +103,7 @@ def get_link_detail_keyboard(link_id: int, is_enabled: bool) -> ReplyKeyboardMar
     else:
         keyboard_buttons.append([
             KeyboardButton(text="▶️ Включить")
-        ])
+    ])
     
     keyboard_buttons.append([
         KeyboardButton(text="🗑 Удалить")

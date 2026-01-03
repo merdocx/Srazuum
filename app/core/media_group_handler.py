@@ -76,8 +76,15 @@ class MediaGroupHandler:
     async def _process_group_after_timeout(
         self,
         media_group_id: int,
-        process_callback
+        process_callback: Any
     ) -> None:
+        """
+        Обработать группу медиа после таймаута.
+        
+        Args:
+            media_group_id: ID медиа-группы
+            process_callback: Функция для обработки группы сообщений
+        """
         """
         Обработать группу после таймаута.
         

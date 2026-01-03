@@ -39,8 +39,6 @@ class MessageProcessor:
         self.max_client = MaxAPIClient()
         from app.core.media_group_handler import MediaGroupHandler
         self.media_group_handler = MediaGroupHandler(timeout_seconds=2)
-        # Семафор для ограничения параллелизма при обработке связей
-        self.crossposting_semaphore = asyncio.Semaphore(settings.crossposting_parallel_links)
     
     async def process_message(
         self,
@@ -220,26 +218,15 @@ class MessageProcessor:
                             
                             # Используем circuit breaker с таймаутом
                             try:
-                                # Создаем задачу для возможности отмены при таймауте
-                                send_task = asyncio.create_task(
+                                max_message = await asyncio.wait_for(
                                     max_api_circuit_breaker.call(
                                         self._send_to_max,
                                         link,
                                         message_data
-                                    )
-                                )
-                                max_message = await asyncio.wait_for(
-                                    send_task,
+                                    ),
                                     timeout=settings.max_api_timeout
                                 )
                             except asyncio.TimeoutError:
-                                # Отменяем задачу при таймауте
-                                if not send_task.done():
-                                    send_task.cancel()
-                                    try:
-                                        await send_task
-                                    except asyncio.CancelledError:
-                                        pass
                                 raise APIError(f"Таймаут при отправке в MAX API (>{settings.max_api_timeout}с)")
                             
                             processing_time = int((datetime.utcnow() - link_start_time).total_seconds() * 1000)
@@ -262,22 +249,6 @@ class MessageProcessor:
                             # Конкретные исключения для API ошибок
                             error_msg = str(e)
                             processing_time = int((datetime.utcnow() - link_start_time).total_seconds() * 1000)
-                            
-                            # Проверяем, является ли это ошибкой неподдерживаемого формата (TGS стикеры, IMAGE_INVALID_FORMAT и т.д.)
-                            # В таком случае просто пропускаем пост, не создавая запись об ошибке
-                            error_lower = error_msg.lower()
-                            if any(keyword in error_lower for keyword in ['tgs', 'не поддерживается', 'not supported', 'стикер не поддерживается', 'image_invalid_format', 'invalid format', 'не получен token', 'expecting value', 'jsondecodeerror', 'невалидный ответ']):
-                                logger.info("message_skipped_unsupported_format", link_id=link.id, telegram_message_id=telegram_message_id, error=error_msg)
-                                # Удаляем запись из лога, так как пост пропускается
-                                try:
-                                    async with async_session_maker() as skip_session:
-                                        await skip_session.delete(message_log)
-                                        await skip_session.commit()
-                                except Exception as delete_error:
-                                    logger.warning("failed_to_delete_message_log_for_skipped", error=str(delete_error))
-                                # Возвращаем None, чтобы пост был пропущен
-                                return (link.id, None, None, processing_time)
-                            
                             await self._handle_send_error(
                                 link.id,
                                 telegram_message_id,
@@ -317,14 +288,9 @@ class MessageProcessor:
                             )
                             return (link.id, None, error_msg, processing_time)
                     
-                    # Параллельная обработка всех связей с ограничением через семафор
-                    async def process_link_with_semaphore(link: CrosspostingLink, message_log: MessageLog):
-                        """Обработать связь с ограничением параллелизма через семафор."""
-                        async with self.crossposting_semaphore:
-                            return await process_link(link, message_log)
-                    
+                    # Параллельная обработка всех связей
                     results = await asyncio.gather(*[
-                        process_link_with_semaphore(link, message_log)
+                        process_link(link, message_log)
                         for link, message_log in message_logs
                     ], return_exceptions=True)
                     
@@ -336,12 +302,6 @@ class MessageProcessor:
                             continue
                         
                         link_id, max_message, error_msg, processing_time = result
-                        
-                        # Если error_msg=None, это означает, что пост был пропущен (неподдерживаемый формат)
-                        # Не обрабатываем такие посты дальше
-                        if error_msg is None and max_message is None:
-                            logger.debug("message_skipped_in_parallel_processing", link_id=link_id, telegram_message_id=telegram_message_id)
-                            continue
                         
                         if max_message:
                             message_log = next(ml for l, ml in message_logs if l.id == link_id)
@@ -553,106 +513,6 @@ class MessageProcessor:
                             logger.warning("failed_to_delete_video_after_error", file_path=local_file_path, error=str(delete_error))
                     logger.warning("failed_to_send_video", error=str(e), video_url=video_url)
                     raise
-            elif message_type == "document":
-                from app.utils.media_handler import delete_media_file
-                document_url = message_data.get("document_url")
-                local_file_path = message_data.get("local_file_path")
-                caption = message_data.get("caption")
-                parse_mode = message_data.get("parse_mode")
-                
-                if not local_file_path:
-                    # Fallback: отправляем текст, если не удалось скачать документ
-                    text = message_data.get("text", message_data.get("caption", "")) or "[Документ]"
-                    return await self.max_client.send_message(
-                        chat_id=max_channel_id,
-                        text=text,
-                        parse_mode=parse_mode
-                    )
-                
-                try:
-                    result = await self.max_client.send_document(
-                        chat_id=max_channel_id,
-                        document_url=document_url,
-                        caption=caption,
-                        local_file_path=local_file_path,
-                        parse_mode=parse_mode
-                    )
-                    # Удаляем файл после успешной отправки (ДО return)
-                    if local_file_path:
-                        try:
-                            await delete_media_file(local_file_path)
-                            logger.info("document_file_deleted_after_send", file_path=local_file_path)
-                        except Exception as delete_error:
-                            # Логируем ошибку удаления, но не прерываем процесс
-                            logger.warning("failed_to_delete_document_after_send", file_path=local_file_path, error=str(delete_error))
-                    return result
-                except Exception as e:
-                    # Удаляем файл даже при ошибке отправки
-                    if local_file_path:
-                        try:
-                            await delete_media_file(local_file_path)
-                            logger.info("document_file_deleted_after_error", file_path=local_file_path)
-                        except Exception as delete_error:
-                            logger.warning("failed_to_delete_document_after_error", file_path=local_file_path, error=str(delete_error))
-                    logger.warning("failed_to_send_document", error=str(e), document_url=document_url)
-                    raise
-            elif message_type == "sticker":
-                from app.utils.media_handler import delete_media_file
-                sticker_url = message_data.get("sticker_url")
-                local_file_path = message_data.get("local_file_path")
-                
-                if not local_file_path:
-                    # Если не удалось скачать стикер, пропускаем его
-                    logger.warning("sticker_not_downloaded_skipping", chat_id=max_channel_id)
-                    raise APIError("Стикер не удалось скачать")
-                
-                try:
-                    result = await self.max_client.send_sticker(
-                        chat_id=max_channel_id,
-                        sticker_url=sticker_url,
-                        local_file_path=local_file_path
-                    )
-                    # Удаляем файл после успешной отправки (ДО return)
-                    if local_file_path:
-                        try:
-                            await delete_media_file(local_file_path)
-                            logger.info("sticker_file_deleted_after_send", file_path=local_file_path)
-                        except Exception as delete_error:
-                            # Логируем ошибку удаления, но не прерываем процесс
-                            logger.warning("failed_to_delete_sticker_after_send", file_path=local_file_path, error=str(delete_error))
-                    return result
-                except APIError as e:
-                    # Для TGS стикеров, IMAGE_INVALID_FORMAT и других неподдерживаемых форматов - пропускаем
-                    error_msg = str(e).lower()
-                    if any(keyword in error_msg for keyword in ['tgs', 'не поддерживается', 'not supported', 'image_invalid_format', 'invalid format']):
-                        logger.info("sticker_not_supported_skipping", error=str(e), sticker_url=sticker_url, chat_id=max_channel_id)
-                        # Удаляем файл
-                        if local_file_path:
-                            try:
-                                await delete_media_file(local_file_path)
-                            except Exception as delete_error:
-                                logger.warning("failed_to_delete_unsupported_sticker", file_path=local_file_path, error=str(delete_error))
-                        # Пропускаем стикер - выбрасываем исключение, которое будет обработано выше
-                        raise APIError(f"Стикер не поддерживается: {e}")
-                    # Для других ошибок - удаляем файл и пробрасываем
-                    if local_file_path:
-                        try:
-                            await delete_media_file(local_file_path)
-                            logger.info("sticker_file_deleted_after_error", file_path=local_file_path)
-                        except Exception as delete_error:
-                            logger.warning("failed_to_delete_sticker_after_error", file_path=local_file_path, error=str(delete_error))
-                    logger.warning("failed_to_send_sticker", error=str(e), sticker_url=sticker_url)
-                    raise
-                except Exception as e:
-                    # Удаляем файл даже при ошибке отправки
-                    if local_file_path:
-                        try:
-                            await delete_media_file(local_file_path)
-                            logger.info("sticker_file_deleted_after_error", file_path=local_file_path)
-                        except Exception as delete_error:
-                            logger.warning("failed_to_delete_sticker_after_error", file_path=local_file_path, error=str(delete_error))
-                    logger.warning("failed_to_send_sticker", error=str(e), sticker_url=sticker_url)
-                    raise
             else:
                 # Для других типов отправляем как текст с указанием типа
                 text = message_data.get("text", message_data.get("caption", "")) or f"[{message_type}]"
@@ -668,21 +528,7 @@ class MessageProcessor:
             )
         except httpx.RequestError as e:
             raise APIError(f"Ошибка сети при отправке в MAX: {e}")
-        except APIError:
-            # Если это уже APIError, пробрасываем как есть (не оборачиваем)
-            raise
-        except (DatabaseError, MediaProcessingError) as e:
-            # Внутренние ошибки - логируем и пробрасываем как APIError для единообразия
-            logger.error("internal_error_in_send_to_max", error=str(e), error_type=type(e).__name__, exc_info=True)
-            raise APIError(f"Внутренняя ошибка при отправке в MAX: {e}")
         except Exception as e:
-            # Неожиданные ошибки - логируем с полной информацией
-            logger.error(
-                "unexpected_error_in_send_to_max",
-                error=str(e),
-                error_type=type(e).__name__,
-                exc_info=True
-            )
             raise APIError(f"Неожиданная ошибка при отправке в MAX: {e}")
     
     async def process_telegram_message(self, message, client=None):
@@ -693,350 +539,202 @@ class MessageProcessor:
             message: Сообщение из Pyrogram
             client: Pyrogram клиент для загрузки медиа (опционально)
         """
-        try:
-            from pyrogram.types import Message
-            from app.utils.media_handler import get_media_url, download_and_store_media
-            
-            # Пропускаем только полностью пустые сообщения (без текста, caption и медиа)
-            # ВАЖНО: Добавляем message.animation и message.video_note для поддержки GIF и кружочков
-            if not message.text and not message.caption and not (message.photo or message.video or message.document or message.audio or message.voice or message.sticker or message.animation or message.video_note):
-                logger.debug("skipping_empty_message", chat_id=message.chat.id if message.chat else None)
+        from pyrogram.types import Message
+        from app.utils.media_handler import get_media_url, download_and_store_media
+        
+        # Пропускаем только полностью пустые сообщения (без текста, caption и медиа)
+        if not message.text and not message.caption and not (message.photo or message.video or message.document or message.audio or message.voice or message.sticker):
+            logger.debug("skipping_empty_message", chat_id=message.chat.id if message.chat else None)
+            return
+        
+        # Получаем ID канала Telegram
+        telegram_chat_id = message.chat.id if message.chat else None
+        if not telegram_chat_id:
+                        return
+        
+        # Если сообщение входит в медиа-группу, обрабатываем через handler
+        if hasattr(message, 'media_group_id') and message.media_group_id is not None:
+            result = await self.media_group_handler.add_message(
+                message,
+                self._process_media_group,
+                client=client
+            )
+            # Если сообщение добавлено в группу, обработка будет позже
+            if result is None:
                 return
-            
-            # Получаем ID канала Telegram
-            telegram_chat_id = message.chat.id if message.chat else None
-            if not telegram_chat_id:
-                            return
-            
-            # Если сообщение входит в медиа-группу, обрабатываем через handler
-            if hasattr(message, 'media_group_id') and message.media_group_id is not None:
-                result = await self.media_group_handler.add_message(
-                    message,
-                    self._process_media_group,
-                    client=client
-                )
-                # Если сообщение добавлено в группу, обработка будет позже
-                if result is None:
-                    return
-                # Если группа обработана сразу (не должно быть), продолжаем
-            
-            # Подготовка данных сообщения
-            message_data = {
-                "type": "text",  # Используем строковое значение напрямую
-                "text": message.text or message.caption or "",
-            }
-            
-            # Определение типа сообщения и получение URL медиа
-            if message.photo:
-                logger.info("processing_photo_message", chat_id=message.chat.id if message.chat else None)
-                message_data["type"] = "photo"
-                # Обрабатываем форматирование caption, если есть
-                if message.caption_entities:
-                    from app.utils.text_formatter import apply_formatting
-                    formatted_caption, caption_parse_mode = apply_formatting(
-                        message.caption or "",
-                        message.caption_entities
-                    )
-                    message_data["caption"] = formatted_caption
-                    message_data["caption_parse_mode"] = caption_parse_mode
-                else:
-                    message_data["caption"] = message.caption
-                if client:
-                    try:
-                        # Скачиваем фото и получаем публичный URL и локальный путь
-                        logger.info("downloading_photo_start", chat_id=message.chat.id if message.chat else None)
-                        photo_url, local_file_path = await download_and_store_media(client, message, "photo")
-                        if photo_url:
-                            logger.info("photo_downloaded", photo_url=photo_url, chat_id=message.chat.id if message.chat else None)
-                            message_data["photo_url"] = photo_url
-                            message_data["local_file_path"] = local_file_path
-                        else:
-                            logger.warning("photo_url_is_none", chat_id=message.chat.id if message.chat else None)
-                            message_data["photo_url"] = None
-                    except Exception as e:
-                        logger.error("failed_to_get_photo_url", error=str(e), exc_info=True)
-                        message_data["photo_url"] = None
-                else:
-                    logger.warning("no_client_for_photo_download", chat_id=message.chat.id if message.chat else None)
-                    message_data["photo_url"] = None
-            elif message.video:
-                logger.info("processing_video_message", chat_id=message.chat.id if message.chat else None)
-                message_data["type"] = "video"
-                # Обрабатываем форматирование caption, если есть
-                if message.caption_entities:
-                    from app.utils.text_formatter import apply_formatting
-                    formatted_caption, caption_parse_mode = apply_formatting(
-                        message.caption or "",
-                        message.caption_entities
-                    )
-                    message_data["caption"] = formatted_caption
-                    message_data["parse_mode"] = caption_parse_mode
-                else:
-                    message_data["caption"] = message.caption
-                if client:
-                    try:
-                        # Скачиваем видео и получаем публичный URL и локальный путь
-                        logger.info("downloading_video_start", chat_id=message.chat.id if message.chat else None)
-                        video_url, local_file_path = await download_and_store_media(client, message, "video")
-                        if video_url and local_file_path:
-                            logger.info("video_downloaded", video_url=video_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
-                            message_data["video_url"] = video_url
-                            message_data["local_file_path"] = local_file_path
-                        else:
-                            logger.warning("video_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
-                            message_data["video_url"] = None
-                            message_data["local_file_path"] = None
-                    except Exception as e:
-                        logger.error("failed_to_get_video_url", error=str(e), exc_info=True)
-                        message_data["video_url"] = None
-                        message_data["local_file_path"] = None
-                else:
-                    message_data["video_url"] = None
-                    message_data["local_file_path"] = None
-            elif message.document:
-                logger.info("processing_document_message", chat_id=message.chat.id if message.chat else None)
-                message_data["type"] = "document"
-                # Обрабатываем форматирование caption, если есть
-                if message.caption_entities:
-                    from app.utils.text_formatter import apply_formatting
-                    formatted_caption, caption_parse_mode = apply_formatting(
-                        message.caption or "",
-                        message.caption_entities
-                    )
-                    message_data["caption"] = formatted_caption
-                    message_data["parse_mode"] = caption_parse_mode
-                else:
-                    message_data["caption"] = message.caption
-                if client:
-                    try:
-                        # Скачиваем документ и получаем публичный URL и локальный путь
-                        logger.info("downloading_document_start", chat_id=message.chat.id if message.chat else None)
-                        document_url, local_file_path = await download_and_store_media(client, message, "document")
-                        if document_url and local_file_path:
-                            logger.info("document_downloaded", document_url=document_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
-                            message_data["document_url"] = document_url
-                            message_data["local_file_path"] = local_file_path
-                        else:
-                            logger.warning("document_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
-                            message_data["document_url"] = None
-                            message_data["local_file_path"] = None
-                    except Exception as e:
-                        logger.error("failed_to_get_document_url", error=str(e), exc_info=True)
-                        message_data["document_url"] = None
-                        message_data["local_file_path"] = None
-                else:
-                    logger.warning("no_client_for_document_download", chat_id=message.chat.id if message.chat else None)
-                    message_data["document_url"] = None
-                    message_data["local_file_path"] = None
-            elif message.animation:
-                # Обработка GIF (message.animation)
-                # В Pyrogram animation похож на video, но это специальный тип для анимированных GIF
-                logger.info("processing_animation_message", chat_id=message.chat.id if message.chat else None)
-                message_data["type"] = "video"  # Обрабатываем animation как video для MAX API
-                # Обрабатываем форматирование caption, если есть
-                if message.caption_entities:
-                    from app.utils.text_formatter import apply_formatting
-                    formatted_caption, caption_parse_mode = apply_formatting(
-                        message.caption or "",
-                        message.caption_entities
-                    )
-                    message_data["caption"] = formatted_caption
-                    message_data["parse_mode"] = caption_parse_mode
-                else:
-                    message_data["caption"] = message.caption
-                if client:
-                    try:
-                        # Скачиваем animation (GIF) и получаем публичный URL и локальный путь
-                        # Используем "animation" как тип для скачивания
-                        logger.info("downloading_animation_start", chat_id=message.chat.id if message.chat else None)
-                        animation_url, local_file_path = await download_and_store_media(client, message, "animation")
-                        if animation_url and local_file_path:
-                            logger.info("animation_downloaded", animation_url=animation_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
-                            message_data["video_url"] = animation_url  # Используем video_url для совместимости с send_video
-                            message_data["local_file_path"] = local_file_path
-                        else:
-                            logger.warning("animation_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
-                            message_data["video_url"] = None
-                            message_data["local_file_path"] = None
-                    except Exception as e:
-                        logger.error("failed_to_get_animation_url", error=str(e), exc_info=True)
-                        message_data["video_url"] = None
-                        message_data["local_file_path"] = None
-                else:
-                    logger.warning("no_client_for_animation_download", chat_id=message.chat.id if message.chat else None)
-                    message_data["video_url"] = None
-                    message_data["local_file_path"] = None
-            elif message.audio:
-                message_data["type"] = "audio"
-                message_data["caption"] = message.caption
-                if client:
-                    try:
-                        message_data["audio_url"] = await get_media_url(client, message)
-                    except Exception as e:
-                        logger.warning("failed_to_get_audio_url", error=str(e))
-                        message_data["audio_url"] = None
-                else:
-                    message_data["audio_url"] = None
-            elif message.voice:
-                message_data["type"] = "voice"
-                if client:
-                    try:
-                        message_data["voice_url"] = await get_media_url(client, message)
-                    except Exception as e:
-                        logger.warning("failed_to_get_voice_url", error=str(e))
-                        message_data["voice_url"] = None
-                else:
-                    message_data["voice_url"] = None
-            elif message.video_note:
-                # Обработка video note (кружочки)
-                # Video note - это обычное MP4 видео в квадратном формате, обрабатываем как video
-                logger.info("processing_video_note_message", chat_id=message.chat.id if message.chat else None)
-                message_data["type"] = "video"  # Обрабатываем video_note как video для MAX API
-                # Обрабатываем форматирование caption, если есть
-                if message.caption_entities:
-                    from app.utils.text_formatter import apply_formatting
-                    formatted_caption, caption_parse_mode = apply_formatting(
-                        message.caption or "",
-                        message.caption_entities
-                    )
-                    message_data["caption"] = formatted_caption
-                    message_data["parse_mode"] = caption_parse_mode
-                else:
-                    message_data["caption"] = message.caption
-                if client:
-                    try:
-                        # Скачиваем video note и получаем публичный URL и локальный путь
-                        logger.info("downloading_video_note_start", chat_id=message.chat.id if message.chat else None)
-                        video_url, local_file_path = await download_and_store_media(client, message, "video_note")
-                        if video_url and local_file_path:
-                            logger.info("video_note_downloaded", video_url=video_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
-                            message_data["video_url"] = video_url
-                            message_data["local_file_path"] = local_file_path
-                        else:
-                            logger.warning("video_note_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
-                            message_data["video_url"] = None
-                            message_data["local_file_path"] = None
-                    except Exception as e:
-                        logger.error("failed_to_get_video_note_url", error=str(e), exc_info=True)
-                        message_data["video_url"] = None
-                        message_data["local_file_path"] = None
-                else:
-                    logger.warning("no_client_for_video_note_download", chat_id=message.chat.id if message.chat else None)
-                    message_data["video_url"] = None
-                    message_data["local_file_path"] = None
-            elif message.sticker:
-                logger.info("processing_sticker_message", chat_id=message.chat.id if message.chat else None)
-                message_data["type"] = "sticker"
-                if client:
-                    try:
-                        # Скачиваем стикер и получаем публичный URL и локальный путь
-                        logger.info("downloading_sticker_start", chat_id=message.chat.id if message.chat else None)
-                        sticker_url, local_file_path = await download_and_store_media(client, message, "sticker")
-                        if sticker_url and local_file_path:
-                            logger.info("sticker_downloaded", sticker_url=sticker_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
-                            message_data["sticker_url"] = sticker_url
-                            message_data["local_file_path"] = local_file_path
-                        else:
-                            logger.warning("sticker_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
-                            message_data["sticker_url"] = None
-                            message_data["local_file_path"] = None
-                    except Exception as e:
-                        logger.error("failed_to_get_sticker_url", error=str(e), exc_info=True)
-                        message_data["sticker_url"] = None
-                        message_data["local_file_path"] = None
-                else:
-                    logger.warning("no_client_for_sticker_download", chat_id=message.chat.id if message.chat else None)
-                    message_data["sticker_url"] = None
-                    message_data["local_file_path"] = None
-            
-            # Обработка форматирования
-            parse_mode = None
-            if message.entities:
+            # Если группа обработана сразу (не должно быть), продолжаем
+        
+        # Подготовка данных сообщения
+        message_data = {
+            "type": "text",  # Используем строковое значение напрямую
+            "text": message.text or message.caption or "",
+        }
+        
+        # Определение типа сообщения и получение URL медиа
+        if message.photo:
+            logger.info("processing_photo_message", chat_id=message.chat.id if message.chat else None)
+            message_data["type"] = "photo"
+            # Обрабатываем форматирование caption, если есть
+            if message.caption_entities:
                 from app.utils.text_formatter import apply_formatting
-                formatted_text, parse_mode = apply_formatting(
-                    message_data.get("text", ""),
-                    message.entities
+                formatted_caption, caption_parse_mode = apply_formatting(
+                    message.caption or "",
+                    message.caption_entities
                 )
-                message_data["text"] = formatted_text
-                message_data["parse_mode"] = parse_mode
-            
-            # Получаем ID канала Telegram
-            telegram_chat_id = message.chat.id if message.chat else None
-            if not telegram_chat_id:
-                return
-            
-            # Находим запись канала в БД по channel_id
-            from app.models.telegram_channel import TelegramChannel
-            async with async_session_maker() as session:
-                result = await session.execute(
-                    select(TelegramChannel).where(TelegramChannel.channel_id == telegram_chat_id)
+                message_data["caption"] = formatted_caption
+                message_data["caption_parse_mode"] = caption_parse_mode
+            else:
+                message_data["caption"] = message.caption
+            if client:
+                try:
+                    # Скачиваем фото и получаем публичный URL и локальный путь
+                    logger.info("downloading_photo_start", chat_id=message.chat.id if message.chat else None)
+                    photo_url, local_file_path = await download_and_store_media(client, message, "photo")
+                    if photo_url:
+                        logger.info("photo_downloaded", photo_url=photo_url, chat_id=message.chat.id if message.chat else None)
+                        message_data["photo_url"] = photo_url
+                        message_data["local_file_path"] = local_file_path
+                    else:
+                        logger.warning("photo_url_is_none", chat_id=message.chat.id if message.chat else None)
+                        message_data["photo_url"] = None
+                except Exception as e:
+                    logger.error("failed_to_get_photo_url", error=str(e), exc_info=True)
+                    message_data["photo_url"] = None
+            else:
+                logger.warning("no_client_for_photo_download", chat_id=message.chat.id if message.chat else None)
+                message_data["photo_url"] = None
+        elif message.video:
+            logger.info("processing_video_message", chat_id=message.chat.id if message.chat else None)
+            message_data["type"] = "video"
+            # Обрабатываем форматирование caption, если есть
+            if message.caption_entities:
+                from app.utils.text_formatter import apply_formatting
+                formatted_caption, caption_parse_mode = apply_formatting(
+                    message.caption or "",
+                    message.caption_entities
                 )
-                telegram_channel = result.scalar_one_or_none()
-                
-                if not telegram_channel:
-                    logger.debug(
-                        "telegram_channel_not_found",
-                        channel_id=telegram_chat_id,
-                        channel_title=message.chat.title if message.chat else None
-                    )
-                    return
-                
-                # Используем ID записи в БД для поиска связей
-                telegram_channel_id = telegram_channel.id
-                logger.info(
-                    "processing_message_from_telegram",
-                    telegram_channel_db_id=telegram_channel_id,
-                    telegram_chat_id=telegram_chat_id,
-                    message_id=message.id,
+                message_data["caption"] = formatted_caption
+                message_data["parse_mode"] = caption_parse_mode
+            else:
+                message_data["caption"] = message.caption
+            if client:
+                try:
+                    # Скачиваем видео и получаем публичный URL и локальный путь
+                    logger.info("downloading_video_start", chat_id=message.chat.id if message.chat else None)
+                    video_url, local_file_path = await download_and_store_media(client, message, "video")
+                    if video_url and local_file_path:
+                        logger.info("video_downloaded", video_url=video_url, local_file_path=local_file_path, chat_id=message.chat.id if message.chat else None)
+                        message_data["video_url"] = video_url
+                        message_data["local_file_path"] = local_file_path
+                    else:
+                        logger.warning("video_url_or_path_is_none", chat_id=message.chat.id if message.chat else None)
+                        message_data["video_url"] = None
+                        message_data["local_file_path"] = None
+                except Exception as e:
+                    logger.error("failed_to_get_video_url", error=str(e), exc_info=True)
+                    message_data["video_url"] = None
+                    message_data["local_file_path"] = None
+            else:
+                message_data["video_url"] = None
+                message_data["local_file_path"] = None
+        elif message.document:
+            message_data["type"] = "document"
+            message_data["caption"] = message.caption
+            if client:
+                try:
+                    message_data["document_url"] = await get_media_url(client, message)
+                except Exception as e:
+                    logger.warning("failed_to_get_document_url", error=str(e))
+                    message_data["document_url"] = None
+            else:
+                message_data["document_url"] = None
+        elif message.audio:
+            message_data["type"] = "audio"
+            message_data["caption"] = message.caption
+            if client:
+                try:
+                    message_data["audio_url"] = await get_media_url(client, message)
+                except Exception as e:
+                    logger.warning("failed_to_get_audio_url", error=str(e))
+                    message_data["audio_url"] = None
+            else:
+                message_data["audio_url"] = None
+        elif message.voice:
+            message_data["type"] = "voice"
+            if client:
+                try:
+                    message_data["voice_url"] = await get_media_url(client, message)
+                except Exception as e:
+                    logger.warning("failed_to_get_voice_url", error=str(e))
+                    message_data["voice_url"] = None
+            else:
+                message_data["voice_url"] = None
+        elif message.sticker:
+            message_data["type"] = "sticker"
+            if client:
+                try:
+                    message_data["sticker_url"] = await get_media_url(client, message)
+                except Exception as e:
+                    logger.warning("failed_to_get_sticker_url", error=str(e))
+                    message_data["sticker_url"] = None
+            else:
+                message_data["sticker_url"] = None
+        
+        # Обработка форматирования
+        parse_mode = None
+        if message.entities:
+            from app.utils.text_formatter import apply_formatting
+            formatted_text, parse_mode = apply_formatting(
+                message_data.get("text", ""),
+                message.entities
+            )
+            message_data["text"] = formatted_text
+            message_data["parse_mode"] = parse_mode
+        
+        # Получаем ID канала Telegram
+        telegram_chat_id = message.chat.id if message.chat else None
+        if not telegram_chat_id:
+            return
+        
+        # Находим запись канала в БД по channel_id
+        from app.models.telegram_channel import TelegramChannel
+        async with async_session_maker() as session:
+            result = await session.execute(
+                select(TelegramChannel).where(TelegramChannel.channel_id == telegram_chat_id)
+            )
+            telegram_channel = result.scalar_one_or_none()
+            
+            if not telegram_channel:
+                logger.debug(
+                    "telegram_channel_not_found",
+                    channel_id=telegram_chat_id,
                     channel_title=message.chat.title if message.chat else None
                 )
+                return
             
-                # Обрабатываем сообщение
-                result = await self.process_message(
-                    telegram_channel_id=telegram_channel_id,
-                    telegram_message_id=message.id,
-                    message_data=message_data
-                )
-                logger.info(
-                    "process_message_result",
-                    telegram_channel_id=telegram_channel_id,
-                    message_id=message.id,
-                    result=result,
-                    success=result is True
-                )
-        except (APIError, httpx.HTTPStatusError, httpx.RequestError, asyncio.TimeoutError) as e:
-            # Ошибки API при обработке сообщения
-            logger.error(
-                "error_processing_telegram_message_api",
-                message_id=message.id if message else None,
-                chat_id=message.chat.id if message and message.chat else None,
-                error=str(e),
-                error_type=type(e).__name__,
-                exc_info=True
+            # Используем ID записи в БД для поиска связей
+            telegram_channel_id = telegram_channel.id
+            logger.info(
+                "processing_message_from_telegram",
+                telegram_channel_db_id=telegram_channel_id,
+                telegram_chat_id=telegram_chat_id,
+                message_id=message.id,
+                channel_title=message.chat.title if message.chat else None
             )
-            return
-        except (DatabaseError, MediaProcessingError) as e:
-            # Ошибки БД или обработки медиа
-            logger.error(
-                "error_processing_telegram_message_internal",
-                message_id=message.id if message else None,
-                chat_id=message.chat.id if message and message.chat else None,
-                error=str(e),
-                error_type=type(e).__name__,
-                exc_info=True
-            )
-            return
-        except Exception as e:
-            # Неожиданные ошибки при обработке сообщения
-            logger.error(
-                "error_processing_telegram_message_unexpected",
-                message_id=message.id if message else None,
-                chat_id=message.chat.id if message and message.chat else None,
-                error=str(e),
-                error_type=type(e).__name__,
-                exc_info=True
-            )
-            return
+        
+        # Обрабатываем сообщение
+        result = await self.process_message(
+            telegram_channel_id=telegram_channel_id,
+            telegram_message_id=message.id,
+            message_data=message_data
+        )
+        logger.info(
+            "process_message_result",
+            telegram_channel_id=telegram_channel_id,
+            message_id=message.id,
+            result=result,
+            success=result is True
+        )
     
     async def _process_media_group(self, messages: List, client=None, link_id: Optional[int] = None) -> None:
         """
@@ -1561,8 +1259,7 @@ class MessageProcessor:
                                             await asyncio.sleep(retry_delay)
                                             retry_delay *= 2
                                             continue
-                                except Exception as parse_error:
-                                    logger.warning("failed_to_parse_attachment_response", error=str(parse_error), attempt=attempt+1)
+                                except:
                                     pass
                             if attempt == max_retries - 1:
                                 raise

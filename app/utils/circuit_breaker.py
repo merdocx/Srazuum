@@ -95,7 +95,7 @@ class CircuitBreaker:
                 # Сбрасываем счетчик ошибок при успехе
                 self.failure_count = 0
     
-    async def _on_failure(self):
+    async def _on_failure(self) -> None:
         """Обработка ошибки."""
         async with self.lock:
             self.failure_count += 1
@@ -121,16 +121,19 @@ class CircuitBreaker:
         """Получить текущее состояние."""
         return self.state
     
-    def reset(self):
-        """Сбросить circuit breaker."""
-        async def _reset():
-            async with self.lock:
-                self.state = CircuitState.CLOSED
-                self.failure_count = 0
-                self.success_count = 0
-                self.last_failure_time = None
-                logger.info("circuit_breaker_reset")
-        return _reset()
+    async def reset(self) -> None:
+        """
+        Сбросить circuit breaker в исходное состояние.
+        """
+        async with self.lock:
+            self.state = CircuitState.CLOSED
+            self.failure_count = 0
+            self.success_count = 0
+            self.last_failure_time = None
+            logger.info("circuit_breaker_reset")
+
+
+
 
 
 

@@ -270,3 +270,5 @@ sudo systemctl list-timers crossposting-backup.timer
 - [journald.conf документация](https://www.freedesktop.org/software/systemd/man/journald.conf.html)
 - [pg_dump документация](https://www.postgresql.org/docs/current/app-pgdump.html)
 
+
+

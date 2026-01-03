@@ -109,3 +109,6 @@ def apply_formatting(text: str, entities: Optional[List[MessageEntity]], parse_m
 
 
 
+
+
+

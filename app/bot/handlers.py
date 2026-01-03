@@ -22,6 +22,7 @@ from app.utils.logger import get_logger
 from app.utils.enums import MessageStatus, MessageType, AuditAction
 from app.utils.validators import TelegramChannelInput, MaxChannelInput
 from app.utils.exceptions import ValidationError, PermissionError, ChannelNotFoundError, APIError
+from aiogram.exceptions import TelegramBadRequest, TelegramNotFound
 from app.bot.keyboards import (
     get_main_keyboard,
     get_channels_list_keyboard,
@@ -196,6 +197,10 @@ async def _process_delete_yes(message: Message, state: FSMContext, link_id: int)
         if link.telegram_channel:
             telegram_channel_id_for_cache = link.telegram_channel.channel_id
         
+        # Сохраняем ID каналов для проверки после удаления
+        telegram_channel_id_for_cleanup = link.telegram_channel_id
+        max_channel_id_for_cleanup = link.max_channel_id
+        
         await session.delete(link)
         await session.commit()
         
@@ -204,6 +209,40 @@ async def _process_delete_yes(message: Message, state: FSMContext, link_id: int)
             cache_key = f"channel_links:{telegram_channel_id_for_cache}"
             await delete_cache(cache_key)
             logger.info("cache_cleared_on_link_delete", channel_id=telegram_channel_id_for_cache, link_id=link_id)
+        
+        # Очистка неиспользуемых каналов после удаления связи
+        async with async_session_maker() as cleanup_session:
+            # Проверяем, есть ли еще связи у Telegram канала
+            telegram_links_count = await cleanup_session.execute(
+                select(func.count(CrosspostingLink.id))
+                .where(CrosspostingLink.telegram_channel_id == telegram_channel_id_for_cleanup)
+            )
+            if telegram_links_count.scalar() == 0:
+                # Нет больше связей - удаляем Telegram канал
+                result_tg = await cleanup_session.execute(
+                    select(TelegramChannel).where(TelegramChannel.id == telegram_channel_id_for_cleanup)
+                )
+                tg_channel = result_tg.scalar_one_or_none()
+                if tg_channel:
+                    await cleanup_session.delete(tg_channel)
+                    logger.info("telegram_channel_cleaned_up", channel_id=tg_channel.id, title=tg_channel.channel_title)
+            
+            # Проверяем, есть ли еще связи у MAX канала
+            max_links_count = await cleanup_session.execute(
+                select(func.count(CrosspostingLink.id))
+                .where(CrosspostingLink.max_channel_id == max_channel_id_for_cleanup)
+            )
+            if max_links_count.scalar() == 0:
+                # Нет больше связей - удаляем MAX канал
+                result_max = await cleanup_session.execute(
+                    select(MaxChannel).where(MaxChannel.id == max_channel_id_for_cleanup)
+                )
+                max_channel = result_max.scalar_one_or_none()
+                if max_channel:
+                    await cleanup_session.delete(max_channel)
+                    logger.info("max_channel_cleaned_up", channel_id=max_channel.id, title=max_channel.channel_title)
+            
+            await cleanup_session.commit()
         
         await log_audit(user.id, AuditAction.DELETE_LINK.value, "crossposting_link", link_id)
         
@@ -424,8 +463,18 @@ async def process_telegram_channel(message: Message, state: FSMContext):
                 channel_id = chat.id
                 channel_title = chat.title or channel_username
                 logger.info("telegram_channel_from_username", channel_id=channel_id, username=channel_username)
+            except (TelegramBadRequest, TelegramNotFound, ValueError) as e:
+                logger.warning("telegram_channel_info_error", 
+                             username=channel_username, 
+                             error=str(e), 
+                             error_type=type(e).__name__)
+                channel_id = None
             except Exception as e:
-                logger.warning(f"Не удалось получить информацию о канале @{channel_username}: {e}")
+                logger.error("unexpected_error_getting_channel_info", 
+                           username=channel_username, 
+                           error=str(e), 
+                           error_type=type(e).__name__,
+                           exc_info=True)
                 channel_id = None
         else:
             await message.answer(
@@ -1386,6 +1435,10 @@ async def cmd_delete(message: Message):
             await session.refresh(link.telegram_channel)
             telegram_channel_id_for_cache = link.telegram_channel.channel_id
         
+        # Сохраняем ID каналов для проверки после удаления
+        telegram_channel_id_for_cleanup = link.telegram_channel_id
+        max_channel_id_for_cleanup = link.max_channel_id
+        
         await session.delete(link)
         await session.commit()
         
@@ -1394,6 +1447,40 @@ async def cmd_delete(message: Message):
             cache_key = f"channel_links:{telegram_channel_id_for_cache}"
             await delete_cache(cache_key)
             logger.info("cache_cleared_on_link_delete", channel_id=telegram_channel_id_for_cache, link_id=link_id)
+        
+        # Очистка неиспользуемых каналов после удаления связи
+        async with async_session_maker() as cleanup_session:
+            # Проверяем, есть ли еще связи у Telegram канала
+            telegram_links_count = await cleanup_session.execute(
+                select(func.count(CrosspostingLink.id))
+                .where(CrosspostingLink.telegram_channel_id == telegram_channel_id_for_cleanup)
+            )
+            if telegram_links_count.scalar() == 0:
+                # Нет больше связей - удаляем Telegram канал
+                result_tg = await cleanup_session.execute(
+                    select(TelegramChannel).where(TelegramChannel.id == telegram_channel_id_for_cleanup)
+                )
+                tg_channel = result_tg.scalar_one_or_none()
+                if tg_channel:
+                    await cleanup_session.delete(tg_channel)
+                    logger.info("telegram_channel_cleaned_up", channel_id=tg_channel.id, title=tg_channel.channel_title)
+            
+            # Проверяем, есть ли еще связи у MAX канала
+            max_links_count = await cleanup_session.execute(
+                select(func.count(CrosspostingLink.id))
+                .where(CrosspostingLink.max_channel_id == max_channel_id_for_cleanup)
+            )
+            if max_links_count.scalar() == 0:
+                # Нет больше связей - удаляем MAX канал
+                result_max = await cleanup_session.execute(
+                    select(MaxChannel).where(MaxChannel.id == max_channel_id_for_cleanup)
+                )
+                max_channel = result_max.scalar_one_or_none()
+                if max_channel:
+                    await cleanup_session.delete(max_channel)
+                    logger.info("max_channel_cleaned_up", channel_id=max_channel.id, title=max_channel.channel_title)
+            
+            await cleanup_session.commit()
         
         await log_audit(user.id, AuditAction.DELETE_LINK.value, "crossposting_link", link_id)
         
@@ -1623,6 +1710,10 @@ async def message_delete_yes(message: Message, state: FSMContext):
             await session.refresh(link.telegram_channel)
             telegram_channel_id_for_cache = link.telegram_channel.channel_id
         
+        # Сохраняем ID каналов для проверки после удаления
+        telegram_channel_id_for_cleanup = link.telegram_channel_id
+        max_channel_id_for_cleanup = link.max_channel_id
+        
         await session.delete(link)
         await session.commit()
         
@@ -1631,6 +1722,40 @@ async def message_delete_yes(message: Message, state: FSMContext):
             cache_key = f"channel_links:{telegram_channel_id_for_cache}"
             await delete_cache(cache_key)
             logger.info("cache_cleared_on_link_delete", channel_id=telegram_channel_id_for_cache, link_id=link_id)
+        
+        # Очистка неиспользуемых каналов после удаления связи
+        async with async_session_maker() as cleanup_session:
+            # Проверяем, есть ли еще связи у Telegram канала
+            telegram_links_count = await cleanup_session.execute(
+                select(func.count(CrosspostingLink.id))
+                .where(CrosspostingLink.telegram_channel_id == telegram_channel_id_for_cleanup)
+            )
+            if telegram_links_count.scalar() == 0:
+                # Нет больше связей - удаляем Telegram канал
+                result_tg = await cleanup_session.execute(
+                    select(TelegramChannel).where(TelegramChannel.id == telegram_channel_id_for_cleanup)
+                )
+                tg_channel = result_tg.scalar_one_or_none()
+                if tg_channel:
+                    await cleanup_session.delete(tg_channel)
+                    logger.info("telegram_channel_cleaned_up", channel_id=tg_channel.id, title=tg_channel.channel_title)
+            
+            # Проверяем, есть ли еще связи у MAX канала
+            max_links_count = await cleanup_session.execute(
+                select(func.count(CrosspostingLink.id))
+                .where(CrosspostingLink.max_channel_id == max_channel_id_for_cleanup)
+            )
+            if max_links_count.scalar() == 0:
+                # Нет больше связей - удаляем MAX канал
+                result_max = await cleanup_session.execute(
+                    select(MaxChannel).where(MaxChannel.id == max_channel_id_for_cleanup)
+                )
+                max_channel = result_max.scalar_one_or_none()
+                if max_channel:
+                    await cleanup_session.delete(max_channel)
+                    logger.info("max_channel_cleaned_up", channel_id=max_channel.id, title=max_channel.channel_title)
+            
+            await cleanup_session.commit()
         
         await log_audit(user.id, AuditAction.DELETE_LINK.value, "crossposting_link", link_id)
         
