@@ -1,0 +1,38 @@
+name: Lint
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    
+    - name: Install linting dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install black flake8 mypy types-redis
+    
+    - name: Run black (code formatting)
+      run: |
+        black --check app/ tests/ admin_panel/backend/app/
+    
+    - name: Run flake8 (code quality)
+      run: |
+        flake8 app/ tests/ admin_panel/backend/app/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 app/ tests/ admin_panel/backend/app/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    
+    - name: Run mypy (type checking)
+      run: |
+        mypy app/ --ignore-missing-imports --no-strict-optional || true
+
