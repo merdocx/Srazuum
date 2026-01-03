@@ -46,11 +46,12 @@ async def main():
     # Обработчики миграции уже зарегистрированы в том же router через импорт
     dp.include_router(router)
     dp.include_router(payments_router)
-    
+
     # Запускаем фоновые задачи для подписок
     from app.payments.subscription_tasks import subscription_tasks_worker
+
     asyncio.create_task(subscription_tasks_worker(interval_seconds=300, bot_instance=bot_instance))
-    
+
     logger.info("bot_starting", bot_token=settings.telegram_bot_token[:10] + "...")
 
     try:

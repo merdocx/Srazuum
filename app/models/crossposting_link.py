@@ -19,9 +19,9 @@ class CrosspostingLink(Base):
     )
     max_channel_id = Column(BigInteger, ForeignKey("max_channels.id", ondelete="CASCADE"), nullable=False, index=True)
     is_enabled = Column(Boolean, default=True, nullable=False, index=True)
-    
+
     # Поля подписки
-    subscription_status = Column(String(50), default='free_trial', nullable=False, index=True)
+    subscription_status = Column(String(50), default="free_trial", nullable=False, index=True)
     free_trial_end_date = Column(DateTime, nullable=True)
     subscription_end_date = Column(DateTime, nullable=True)
     is_first_link = Column(Boolean, default=False, nullable=False)
@@ -29,7 +29,7 @@ class CrosspostingLink(Base):
     payment_id = Column(String(255), nullable=True)
     payment_status = Column(String(50), nullable=True)
     yookassa_payment_id = Column(String(255), nullable=True)
-    
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
