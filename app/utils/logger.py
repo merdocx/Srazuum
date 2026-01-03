@@ -1,4 +1,5 @@
 """Настройка логирования."""
+
 import structlog
 import logging
 import sys
@@ -13,7 +14,7 @@ def setup_logging():
         stream=sys.stdout,
         level=getattr(logging, settings.log_level.upper()),
     )
-    
+
     # Настройка structlog
     structlog.configure(
         processors=[
@@ -37,13 +38,3 @@ def setup_logging():
 def get_logger(name: str = __name__):
     """Получить логгер."""
     return structlog.get_logger(name)
-
-
-
-
-
-
-
-
-
-

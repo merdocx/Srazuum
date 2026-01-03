@@ -1,4 +1,5 @@
 """Тесты для конвертера chat_id."""
+
 import pytest
 from app.utils.chat_id_converter import convert_chat_id
 
@@ -26,11 +27,3 @@ def test_convert_string_non_numeric():
     """Тест преобразования нечисловой строки."""
     result = convert_chat_id("abc")
     assert result == "abc"  # Возвращается как есть
-
-
-
-
-
-
-
-

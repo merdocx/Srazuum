@@ -1,4 +1,5 @@
 """Обработчики команд Telegram бота."""
+
 import asyncio
 import re
 from aiogram import Router, F, Bot
@@ -33,7 +34,7 @@ from app.bot.keyboards import (
     get_migrate_links_keyboard,
     get_migration_offer_keyboard,
     get_cancel_keyboard,
-    get_stop_migration_keyboard
+    get_stop_migration_keyboard,
 )
 from config.database import async_session_maker
 from config.settings import settings
@@ -70,12 +71,14 @@ def get_bot_id() -> int:
 
 class AddChannelStates(StatesGroup):
     """Состояния для добавления канала."""
+
     waiting_telegram_channel = State()
     waiting_max_channel = State()
 
 
 class LinkManagementStates(StatesGroup):
     """Состояния для управления связями."""
+
     viewing_link_detail = State()  # Хранит link_id
     viewing_channels_list = State()  # Хранит page
     confirming_delete = State()  # Хранит link_id
@@ -83,6 +86,7 @@ class LinkManagementStates(StatesGroup):
 
 class MigrateStates(StatesGroup):
     """Состояния для миграции постов."""
+
     selecting_link = State()  # Выбор связи для миграции
     migrating = State()  # Процесс миграции активен
 
@@ -90,34 +94,23 @@ class MigrateStates(StatesGroup):
 async def get_or_create_user(telegram_user_id: int, username: Optional[str] = None) -> User:
     """Получить или создать пользователя."""
     async with async_session_maker() as session:
-        result = await session.execute(
-            select(User).where(User.telegram_user_id == telegram_user_id)
-        )
+        result = await session.execute(select(User).where(User.telegram_user_id == telegram_user_id))
         user = result.scalar_one_or_none()
-        
+
         if not user:
-            user = User(
-                telegram_user_id=telegram_user_id,
-                telegram_username=username
-            )
+            user = User(telegram_user_id=telegram_user_id, telegram_username=username)
             session.add(user)
             await session.commit()
             await session.refresh(user)
             logger.info("user_created", user_id=user.id, telegram_user_id=telegram_user_id)
-        
+
         return user
 
 
 async def log_audit(user_id: int, action: str, entity_type: str, entity_id: int, details: dict = None):
     """Логировать действие в аудит."""
     async with async_session_maker() as session:
-        audit_log = AuditLog(
-            user_id=user_id,
-            action=action,
-            entity_type=entity_type,
-            entity_id=entity_id,
-            details=details
-        )
+        audit_log = AuditLog(user_id=user_id, action=action, entity_type=entity_type, entity_id=entity_id, details=details)
         session.add(audit_log)
         await session.commit()
 
@@ -129,15 +122,11 @@ async def message_delete_yes_handler(message: Message, state: FSMContext):
     """Обработчик кнопки 'Да, удалить' в состоянии confirming_delete."""
     data = await state.get_data()
     link_id = data.get("delete_link_id")
-    
+
     logger.info(
-        "delete_yes_handler_called",
-        user_id=message.from_user.id,
-        message_text=message.text,
-        link_id=link_id,
-        state_data=data
+        "delete_yes_handler_called", user_id=message.from_user.id, message_text=message.text, link_id=link_id, state_data=data
     )
-    
+
     if link_id:
         await _process_delete_yes(message, state, link_id)
     else:
@@ -150,72 +139,62 @@ async def message_delete_cancel_handler(message: Message, state: FSMContext):
     """Обработчик кнопки 'Отмена' в состоянии confirming_delete."""
     data = await state.get_data()
     link_id = data.get("delete_link_id")
-    
-    logger.info(
-        "delete_cancel_handler_called",
-        user_id=message.from_user.id,
-        message_text=message.text,
-        link_id=link_id
-    )
-    
+
+    logger.info("delete_cancel_handler_called", user_id=message.from_user.id, message_text=message.text, link_id=link_id)
+
     await _process_delete_cancel(message, state, link_id)
-
-
-
-
 
 
 async def _process_delete_yes(message: Message, state: FSMContext, link_id: int):
     """Внутренняя функция для обработки подтвержденного удаления связи."""
     logger.info("delete_yes_processing", user_id=message.from_user.id, link_id=link_id)
-    
+
     if not link_id:
         await message.answer("Ошибка: не найдена связь для удаления.")
         await state.clear()
         return
-    
+
     user = await get_or_create_user(message.from_user.id, message.from_user.username)
-    
+
     async with async_session_maker() as session:
         result = await session.execute(
             select(CrosspostingLink)
-            .options(
-                selectinload(CrosspostingLink.telegram_channel)
-            )
+            .options(selectinload(CrosspostingLink.telegram_channel))
             .where(CrosspostingLink.id == link_id)
             .where(CrosspostingLink.user_id == user.id)
         )
         link = result.scalar_one_or_none()
-        
+
         if not link:
             await message.answer("Связь не найдена.")
             await state.clear()
             return
-        
+
         # КРИТИЧНО: Сохраняем channel_id перед удалением для очистки кэша
         telegram_channel_id_for_cache = None
         if link.telegram_channel:
             telegram_channel_id_for_cache = link.telegram_channel.channel_id
-        
+
         # Сохраняем ID каналов для проверки после удаления
         telegram_channel_id_for_cleanup = link.telegram_channel_id
         max_channel_id_for_cleanup = link.max_channel_id
-        
+
         await session.delete(link)
         await session.commit()
-        
+
         # КРИТИЧНО: Очищаем кэш для канала при удалении связи
         if telegram_channel_id_for_cache:
             cache_key = f"channel_links:{telegram_channel_id_for_cache}"
             await delete_cache(cache_key)
             logger.info("cache_cleared_on_link_delete", channel_id=telegram_channel_id_for_cache, link_id=link_id)
-        
+
         # Очистка неиспользуемых каналов после удаления связи
         async with async_session_maker() as cleanup_session:
             # Проверяем, есть ли еще связи у Telegram канала
             telegram_links_count = await cleanup_session.execute(
-                select(func.count(CrosspostingLink.id))
-                .where(CrosspostingLink.telegram_channel_id == telegram_channel_id_for_cleanup)
+                select(func.count(CrosspostingLink.id)).where(
+                    CrosspostingLink.telegram_channel_id == telegram_channel_id_for_cleanup
+                )
             )
             if telegram_links_count.scalar() == 0:
                 # Нет больше связей - удаляем Telegram канал
@@ -226,11 +205,10 @@ async def _process_delete_yes(message: Message, state: FSMContext, link_id: int)
                 if tg_channel:
                     await cleanup_session.delete(tg_channel)
                     logger.info("telegram_channel_cleaned_up", channel_id=tg_channel.id, title=tg_channel.channel_title)
-            
+
             # Проверяем, есть ли еще связи у MAX канала
             max_links_count = await cleanup_session.execute(
-                select(func.count(CrosspostingLink.id))
-                .where(CrosspostingLink.max_channel_id == max_channel_id_for_cleanup)
+                select(func.count(CrosspostingLink.id)).where(CrosspostingLink.max_channel_id == max_channel_id_for_cleanup)
             )
             if max_links_count.scalar() == 0:
                 # Нет больше связей - удаляем MAX канал
@@ -241,11 +219,11 @@ async def _process_delete_yes(message: Message, state: FSMContext, link_id: int)
                 if max_channel:
                     await cleanup_session.delete(max_channel)
                     logger.info("max_channel_cleaned_up", channel_id=max_channel.id, title=max_channel.channel_title)
-            
+
             await cleanup_session.commit()
-        
+
         await log_audit(user.id, AuditAction.DELETE_LINK.value, "crossposting_link", link_id)
-        
+
         text = f"🗑️ Связь #{link_id} удалена."
         keyboard = get_back_to_menu_keyboard()
         await message.answer(text, reply_markup=keyboard)
@@ -256,7 +234,7 @@ async def _process_delete_yes(message: Message, state: FSMContext, link_id: int)
 async def _process_delete_cancel(message: Message, state: FSMContext, link_id: int):
     """Внутренняя функция для обработки отмены удаления."""
     logger.info("delete_cancel_processing", user_id=message.from_user.id, link_id=link_id)
-    
+
     if link_id:
         # Возвращаемся к деталям связи
         await show_link_detail(message, state, link_id)
@@ -271,13 +249,13 @@ async def _process_delete_cancel(message: Message, state: FSMContext, link_id: i
 async def cmd_start(message: Message):
     """Обработчик команды /start."""
     user = await get_or_create_user(message.from_user.id, message.from_user.username)
-    
+
     text = (
         "Привет! Я помогу вам настроить кросспостинг из Telegram в MAX.\n\n"
         "Используйте кнопку «➕ Добавить связь» для создания связи между каналами в Telegram и MAX.\n\n"
         "Выберите действие:"
     )
-    
+
     await message.answer(text, reply_markup=get_main_keyboard())
     logger.info("start_command", user_id=user.id, telegram_user_id=message.from_user.id)
 
@@ -335,10 +313,7 @@ async def message_main_menu(message: Message, state: FSMContext):
 async def message_cancel_add_channel(message: Message, state: FSMContext):
     """Обработчик кнопки 'Отмена' - отменяет процесс создания связи."""
     await state.clear()
-    text = (
-        "❌ Создание связи отменено.\n\n"
-        "Выберите действие:"
-    )
+    text = "❌ Создание связи отменено.\n\n" "Выберите действие:"
     await message.answer(text, reply_markup=get_main_keyboard())
     logger.info("add_channel_cancelled", user_id=message.from_user.id)
 
@@ -348,7 +323,7 @@ async def message_retry(message: Message, state: FSMContext):
     """Обработчик кнопки повтора."""
     data = await state.get_data()
     retry_state = data.get("retry_state", "add_channel")
-    
+
     if retry_state == "telegram_channel":
         await state.set_state(AddChannelStates.waiting_telegram_channel)
         text = (
@@ -360,7 +335,9 @@ async def message_retry(message: Message, state: FSMContext):
             "📝 Для создания связи:\n\n"
             "Шаг 1: Отправьте ссылку на Telegram-канал (пример: https://t.me/username)"
         )
-        await message.answer(text, reply_markup=get_cancel_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        await message.answer(
+            text, reply_markup=get_cancel_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True
+        )
     elif retry_state == "max_channel":
         await state.set_state(AddChannelStates.waiting_max_channel)
         text = "Отправьте ссылку на MAX-канал (пример: https://max.ru/username)"
@@ -376,8 +353,10 @@ async def message_retry(message: Message, state: FSMContext):
             "📝 Для создания связи:\n\n"
             "Шаг 1: Отправьте ссылку на Telegram-канал (пример: https://t.me/username)"
         )
-        await message.answer(text, reply_markup=get_cancel_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
-    
+        await message.answer(
+            text, reply_markup=get_cancel_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True
+        )
+
     logger.info("retry_action", state=retry_state, user_id=message.from_user.id)
 
 
@@ -393,7 +372,9 @@ async def cmd_add_channel(message: Message, state: FSMContext):
         "📝 Для создания связи:\n\n"
         "Шаг 1: Отправьте ссылку на Telegram-канал (пример: https://t.me/username)"
     )
-    await message.answer(text, reply_markup=get_cancel_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+    await message.answer(
+        text, reply_markup=get_cancel_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True
+    )
     await state.set_state(AddChannelStates.waiting_telegram_channel)
     logger.info("add_channel_started", user_id=message.from_user.id)
 
@@ -410,7 +391,9 @@ async def message_add_channel(message: Message, state: FSMContext):
         "📝 Для создания связи:\n\n"
         "Шаг 1: Отправьте ссылку на Telegram-канал (пример: https://t.me/username)"
     )
-    await message.answer(text, reply_markup=get_cancel_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+    await message.answer(
+        text, reply_markup=get_cancel_keyboard(), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True
+    )
     await state.set_state(AddChannelStates.waiting_telegram_channel)
     logger.info("add_channel_started", user_id=message.from_user.id)
 
@@ -419,40 +402,42 @@ async def message_add_channel(message: Message, state: FSMContext):
 async def process_telegram_channel(message: Message, state: FSMContext):
     """Обработка Telegram канала. Принимаем только ссылки."""
     import re
-    
+
     channel_id = None
     channel_username = None
     channel_title = "Unknown"
-    
+
     # Вариант 1: Пересылка сообщения из канала
     if message.forward_from_chat:
         channel_id = message.forward_from_chat.id
         channel_username = message.forward_from_chat.username
         channel_title = message.forward_from_chat.title or "Unknown"
         logger.info("telegram_channel_from_forward", channel_id=channel_id, username=channel_username)
-    
+
     # Вариант 2: Текст со ссылкой или username
     elif message.text:
         text = message.text.strip()
-        
+
         # Извлекаем username из различных форматов
         username_match = None
-        
+
         # Формат: @username
         if text.startswith("@"):
             username_match = text[1:]
         # Формат: https://t.me/username или t.me/username или telegram.me/username
-        elif re.match(r'^(https?://)?(www\.)?(t\.me|telegram\.me)/', text, re.IGNORECASE):
+        elif re.match(r"^(https?://)?(www\.)?(t\.me|telegram\.me)/", text, re.IGNORECASE):
             # Извлекаем username из ссылки
             parts = text.split("/")
             potential_username = parts[-1].split("?")[0]  # Убираем query параметры
             # Пропускаем joinchat ссылки (приватные каналы) и другие служебные пути
-            if (potential_username and 
-                potential_username != "joinchat" and 
-                not potential_username.startswith("+") and
-                re.match(r'^[a-zA-Z0-9_]{5,32}$', potential_username)):
+            if (
+                potential_username
+                and potential_username != "joinchat"
+                and not potential_username.startswith("+")
+                and re.match(r"^[a-zA-Z0-9_]{5,32}$", potential_username)
+            ):
                 username_match = potential_username
-        
+
         if username_match:
             channel_username = username_match
             channel_title = channel_username
@@ -464,17 +449,18 @@ async def process_telegram_channel(message: Message, state: FSMContext):
                 channel_title = chat.title or channel_username
                 logger.info("telegram_channel_from_username", channel_id=channel_id, username=channel_username)
             except (TelegramBadRequest, TelegramNotFound, ValueError) as e:
-                logger.warning("telegram_channel_info_error", 
-                             username=channel_username, 
-                             error=str(e), 
-                             error_type=type(e).__name__)
+                logger.warning(
+                    "telegram_channel_info_error", username=channel_username, error=str(e), error_type=type(e).__name__
+                )
                 channel_id = None
             except Exception as e:
-                logger.error("unexpected_error_getting_channel_info", 
-                           username=channel_username, 
-                           error=str(e), 
-                           error_type=type(e).__name__,
-                           exc_info=True)
+                logger.error(
+                    "unexpected_error_getting_channel_info",
+                    username=channel_username,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    exc_info=True,
+                )
                 channel_id = None
         else:
             await message.answer(
@@ -484,7 +470,7 @@ async def process_telegram_channel(message: Message, state: FSMContext):
                 "• @username\n"
                 "• https://t.me/username\n\n"
                 "⚠️ Добавление по ID не поддерживается. Используйте ссылку или username.",
-                reply_markup=get_retry_keyboard("telegram_channel")
+                reply_markup=get_retry_keyboard("telegram_channel"),
             )
             return
     else:
@@ -495,80 +481,73 @@ async def process_telegram_channel(message: Message, state: FSMContext):
             "• Отправьте @username\n"
             "• Отправьте ссылку https://t.me/username\n\n"
             "⚠️ Добавление по ID не поддерживается.",
-            reply_markup=get_retry_keyboard("telegram_channel")
+            reply_markup=get_retry_keyboard("telegram_channel"),
         )
         return
-    
+
     user = await get_or_create_user(message.from_user.id, message.from_user.username)
-    
+
     async with async_session_maker() as session:
         # Проверка существования канала
         if channel_id:
-            result = await session.execute(
-                select(TelegramChannel).where(TelegramChannel.channel_id == channel_id)
-            )
+            result = await session.execute(select(TelegramChannel).where(TelegramChannel.channel_id == channel_id))
         else:
-            result = await session.execute(
-                select(TelegramChannel).where(TelegramChannel.channel_username == channel_username)
-            )
-        
+            result = await session.execute(select(TelegramChannel).where(TelegramChannel.channel_username == channel_username))
+
         telegram_channel = result.scalar_one_or_none()
-        
+
         if not telegram_channel:
             if not channel_id:
                 await message.answer(
                     "Не удалось определить ID канала. Попробуйте переслать сообщение из канала.",
-                    reply_markup=get_retry_keyboard("telegram_channel")
+                    reply_markup=get_retry_keyboard("telegram_channel"),
                 )
                 return
-            
+
             # Валидация входных данных
             try:
                 telegram_input = TelegramChannelInput(
-                    channel_id=channel_id,
-                    channel_username=channel_username,
-                    channel_title=channel_title
+                    channel_id=channel_id, channel_username=channel_username, channel_title=channel_title
                 )
             except Exception as e:
                 logger.warning("validation_error", error=str(e))
                 await message.answer(
-                    "❌ Ошибка валидации данных Telegram канала.",
-                    reply_markup=get_retry_keyboard("telegram_channel")
+                    "❌ Ошибка валидации данных Telegram канала.", reply_markup=get_retry_keyboard("telegram_channel")
                 )
                 return
-            
+
             # Проверка прав бота в канале
             try:
                 bot = get_bot()
                 bot_id = get_bot_id()
                 member = await bot.get_chat_member(chat_id=channel_id, user_id=bot_id)
-                if member.status not in ['administrator', 'creator']:
+                if member.status not in ["administrator", "creator"]:
                     await message.answer(
                         "❌ Бот не является администратором канала. Добавьте бота в канал с правами администратора.",
-                        reply_markup=get_retry_keyboard("telegram_channel")
+                        reply_markup=get_retry_keyboard("telegram_channel"),
                     )
                     return
             except Exception as e:
                 logger.warning(f"Не удалось проверить права бота в канале: {e}")
-            
+
             telegram_channel = TelegramChannel(
                 user_id=user.id,
                 channel_id=telegram_input.channel_id,
                 channel_username=telegram_input.channel_username,
-                channel_title=telegram_input.channel_title
+                channel_title=telegram_input.channel_title,
             )
             session.add(telegram_channel)
             await session.commit()
             await session.refresh(telegram_channel)
-        
+
         await state.update_data(telegram_channel_id=telegram_channel.id)
         await state.set_state(AddChannelStates.waiting_max_channel)
-        
+
         await message.answer(
             f"Telegram-канал '{channel_title}' добавлен.\n\n"
             "Шаг 2: Отправьте ссылку на MAX-канал (пример: https://max.ru/username)",
             reply_markup=get_cancel_keyboard(),
-            disable_web_page_preview=True
+            disable_web_page_preview=True,
         )
 
 
@@ -576,243 +555,247 @@ async def process_telegram_channel(message: Message, state: FSMContext):
 async def process_max_channel(message: Message, state: FSMContext):
     """Обработка MAX канала."""
     import re
-    
+
     user_input = message.text.strip() if message.text else ""
-    
+
     if not user_input:
         await message.answer(
             "❌ Пожалуйста, укажите ссылку на MAX-канал.\n\n"
             "Формат: https://max.ru/username\n\n"
             "⚠️ Добавление по ID не поддерживается. Используйте ссылку.",
-            reply_markup=get_retry_keyboard("max_channel")
+            reply_markup=get_retry_keyboard("max_channel"),
         )
         return
-    
+
     user = await get_or_create_user(message.from_user.id, message.from_user.username)
     data = await state.get_data()
     telegram_channel_id = data.get("telegram_channel_id")
-    
+
     # Извлекаем username из ссылки (только ссылки поддерживаются)
     max_channel_id = None
     channel_username = None
     is_from_link = False
-    
+
     # Проверяем, является ли это ссылкой
-    if re.match(r'https?://', user_input, re.IGNORECASE):
+    if re.match(r"https?://", user_input, re.IGNORECASE):
         is_from_link = True
         # Извлекаем username из ссылки
         # Поддерживаем форматы:
         # - https://max.ru/username
         # - https://max.ru/channel/username
-        
+
         # Парсим URL
         url_parts = user_input.split("/")
         # Убираем query параметры и якоря
         last_part = url_parts[-1].split("?")[0].split("#")[0]
-        
+
         # Если последняя часть - это "channel", берем предыдущую
         if last_part == "channel" and len(url_parts) >= 4:
             last_part = url_parts[-2]
-        
+
         # Проверяем, не бот ли это (только если заканчивается на _bot)
         if last_part.endswith("_bot"):
             # Это бот, не канал
             await message.answer(
-                "❌ Это ссылка на бота, а не на канал.\n\n"
-                "Пожалуйста, укажите ссылку на MAX канал.",
-                reply_markup=get_retry_keyboard("max_channel")
+                "❌ Это ссылка на бота, а не на канал.\n\n" "Пожалуйста, укажите ссылку на MAX канал.",
+                reply_markup=get_retry_keyboard("max_channel"),
             )
             return
-        
+
         # Сохраняем полную ссылку для сравнения
         channel_username = last_part
         max_channel_id = last_part  # Используем для поиска
         # Нормализуем ссылку для сравнения (убираем протокол и www)
-        normalized_user_link = re.sub(r'^https?://(?:www\.)?', '', user_input.lower()).rstrip('/')
-        logger.info("max_channel_from_link", 
-                  username=channel_username, 
-                  link=user_input,
-                  normalized_link=normalized_user_link)
+        normalized_user_link = re.sub(r"^https?://(?:www\.)?", "", user_input.lower()).rstrip("/")
+        logger.info("max_channel_from_link", username=channel_username, link=user_input, normalized_link=normalized_user_link)
     else:
         # Не ссылка - отклоняем
         await message.answer(
             "❌ Пожалуйста, укажите ссылку на MAX-канал.\n\n"
             "Формат: https://max.ru/username\n\n"
             "⚠️ Добавление по ID или username без ссылки не поддерживается.",
-            reply_markup=get_retry_keyboard("max_channel")
+            reply_markup=get_retry_keyboard("max_channel"),
         )
         return
-    
+
     async with async_session_maker() as session:
         # Создание или получение MAX канала
-        result = await session.execute(
-            select(MaxChannel).where(MaxChannel.channel_id == max_channel_id)
-        )
+        result = await session.execute(select(MaxChannel).where(MaxChannel.channel_id == max_channel_id))
         max_channel = result.scalar_one_or_none()
-        
+
         if not max_channel:
             # Валидация входных данных
             try:
                 max_input = MaxChannelInput(channel_id=max_channel_id)
             except Exception as e:
                 logger.warning("validation_error", error=str(e))
-                await message.answer(
-                    "❌ Ошибка валидации данных MAX канала.",
-                    reply_markup=get_retry_keyboard("max_channel")
-                )
+                await message.answer("❌ Ошибка валидации данных MAX канала.", reply_markup=get_retry_keyboard("max_channel"))
                 return
-            
+
             # Пытаемся получить информацию о канале через MAX API
             channel_title = max_channel_id
             actual_channel_id = max_channel_id  # ID, который будем сохранять
-            
+
             try:
                 from app.max_api.client import MaxAPIClient
+
                 max_client = MaxAPIClient()
-                
+
                 # Сначала пытаемся получить список доступных чатов
                 # Это работает для всех случаев (и для ID, и для username)
                 logger.info("getting_available_chats_for_channel", input=max_channel_id, is_link=is_from_link)
                 available_chats = await max_client.get_available_chats()
-                
+
                 # Логируем полную структуру первых чатов для отладки
-                logger.info("available_chats_received", 
-                          count=len(available_chats),
-                          chats_preview=[dict(chat) for chat in available_chats[:5]])  # Полная структура первых 5
-                
+                logger.info(
+                    "available_chats_received",
+                    count=len(available_chats),
+                    chats_preview=[dict(chat) for chat in available_chats[:5]],
+                )  # Полная структура первых 5
+
                 # Логируем все username из доступных чатов
                 all_usernames = []
                 for chat in available_chats:
                     username = None
-                    if 'username' in chat and chat['username']:
-                        username = chat['username']
-                    elif 'name' in chat and chat['name']:
-                        username = chat['name']
+                    if "username" in chat and chat["username"]:
+                        username = chat["username"]
+                    elif "name" in chat and chat["name"]:
+                        username = chat["name"]
                     if username:
                         all_usernames.append(username)
                 logger.info("available_chats_usernames", usernames=all_usernames, search_for=max_channel_id)
-                
+
                 found_chat = None
-                
+
                 # Ищем канал только по ссылке из поля 'link'
                 # Сравниваем полные ссылки (нормализованные)
                 # Нормализуем пользовательскую ссылку: убираем протокол, www, trailing slash
-                normalized_user_link = re.sub(r'^https?://(?:www\.)?', '', user_input.lower()).rstrip('/')
+                normalized_user_link = re.sub(r"^https?://(?:www\.)?", "", user_input.lower()).rstrip("/")
                 # Извлекаем последнюю часть (username/id) из пользовательской ссылки
-                user_link_part = normalized_user_link.split('/')[-1].split('?')[0].split('#')[0].lower()
-                
+                user_link_part = normalized_user_link.split("/")[-1].split("?")[0].split("#")[0].lower()
+
                 found_username_from_link = None
-                logger.info("searching_chat_by_link", 
-                          user_link=user_input,
-                          normalized_user_link=normalized_user_link,
-                          user_link_part=user_link_part,
-                          available_chats_count=len(available_chats))
-                
+                logger.info(
+                    "searching_chat_by_link",
+                    user_link=user_input,
+                    normalized_user_link=normalized_user_link,
+                    user_link_part=user_link_part,
+                    available_chats_count=len(available_chats),
+                )
+
                 for idx, chat in enumerate(available_chats):
                     match_found = False
                     chat_username_raw = None
-                        
+
                     # Ищем только по полю 'link' - сравниваем полные ссылки или последнюю часть
-                    if 'link' in chat and chat['link']:
-                        chat_link = chat['link']
+                    if "link" in chat and chat["link"]:
+                        chat_link = chat["link"]
                         # Нормализуем ссылку из API (убираем протокол и www)
-                        normalized_chat_link = re.sub(r'^https?://(?:www\.)?', '', chat_link.lower()).rstrip('/')
+                        normalized_chat_link = re.sub(r"^https?://(?:www\.)?", "", chat_link.lower()).rstrip("/")
                         # Извлекаем последнюю часть из ссылки API
-                        chat_link_part = normalized_chat_link.split('/')[-1].split('?')[0].split('#')[0].lower()
-                        
+                        chat_link_part = normalized_chat_link.split("/")[-1].split("?")[0].split("#")[0].lower()
+
                         # Сравниваем либо полные нормализованные ссылки, либо последнюю часть URL
                         match_found = (normalized_user_link == normalized_chat_link) or (user_link_part == chat_link_part)
-                        
+
                         # Извлекаем username/id из ссылки для логирования и сохранения
-                        link_match = re.search(r'https?://(?:www\.)?max\.ru/([^/?#]+)', chat_link, re.IGNORECASE)
+                        link_match = re.search(r"https?://(?:www\.)?max\.ru/([^/?#]+)", chat_link, re.IGNORECASE)
                         if link_match:
                             chat_username_raw = link_match.group(1)
-                        
+
                         # Логируем сравнение для отладки
-                        logger.info("comparing_by_link", 
-                                    chat_index=idx,
-                                user_link=user_input,
-                                    chat_link=chat.get('link'),
-                                normalized_user=normalized_user_link,
-                                normalized_chat=normalized_chat_link if 'link' in chat and chat['link'] else None,
-                                user_part=user_link_part,
-                                chat_part=chat_link_part if 'link' in chat and chat['link'] else None,
-                                    match=match_found)
-                        
+                        logger.info(
+                            "comparing_by_link",
+                            chat_index=idx,
+                            user_link=user_input,
+                            chat_link=chat.get("link"),
+                            normalized_user=normalized_user_link,
+                            normalized_chat=normalized_chat_link if "link" in chat and chat["link"] else None,
+                            user_part=user_link_part,
+                            chat_part=chat_link_part if "link" in chat and chat["link"] else None,
+                            match=match_found,
+                        )
+
                         if match_found:
                             found_chat = chat
                             found_username_from_link = chat_username_raw
-                            logger.info("max_channel_found_by_link", 
-                                  user_link=user_input,
-                                  found_link=chat.get('link'),
-                                  found_username=found_username_from_link,
-                                  chat_id=chat.get('id') or chat.get('chat_id'))
+                            logger.info(
+                                "max_channel_found_by_link",
+                                user_link=user_input,
+                                found_link=chat.get("link"),
+                                found_username=found_username_from_link,
+                                chat_id=chat.get("id") or chat.get("chat_id"),
+                            )
                             break
-                
+
                 if found_chat:
                     # Если нашли канал, извлекаем все данные
                     # MAX API использует 'chat_id', а не 'id'
-                    if 'chat_id' in found_chat:
-                        actual_channel_id = str(found_chat['chat_id'])
-                    elif 'id' in found_chat:
-                        actual_channel_id = str(found_chat['id'])
-                    
-                    if 'title' in found_chat:
-                        channel_title = found_chat['title']
-                    elif 'name' in found_chat:
-                        channel_title = found_chat['name']
-                    
+                    if "chat_id" in found_chat:
+                        actual_channel_id = str(found_chat["chat_id"])
+                    elif "id" in found_chat:
+                        actual_channel_id = str(found_chat["id"])
+
+                    if "title" in found_chat:
+                        channel_title = found_chat["title"]
+                    elif "name" in found_chat:
+                        channel_title = found_chat["name"]
+
                     # Извлекаем username из поля 'link' (https://max.ru/username или https://max.ru/id123_biz)
                     # Это единственный надежный источник для сравнения
-                    if 'link' in found_chat and found_chat['link']:
-                        link = found_chat['link']
-                        link_match = re.search(r'https?://(?:www\.)?max\.ru/([^/?#]+)', link, re.IGNORECASE)
+                    if "link" in found_chat and found_chat["link"]:
+                        link = found_chat["link"]
+                        link_match = re.search(r"https?://(?:www\.)?max\.ru/([^/?#]+)", link, re.IGNORECASE)
                         if link_match:
                             extracted_username = link_match.group(1)
                             # Пропускаем только служебные пути, но не id*_biz или id*_bot (это валидные каналы)
-                            if extracted_username != 'channel':
+                            if extracted_username != "channel":
                                 channel_username = extracted_username
-                                logger.info("username_extracted_from_link", 
-                                          username=channel_username, 
-                                          link=link)
-                    
+                                logger.info("username_extracted_from_link", username=channel_username, link=link)
+
                     # Если username не был извлечен из link, используем найденный при поиске
                     if not channel_username and found_username_from_link:
                         channel_username = found_username_from_link
                     elif not channel_username:
                         channel_username = max_channel_id
-                    
-                    logger.info("max_channel_found", 
-                              original_input=max_channel_id,
-                              channel_id=actual_channel_id,
-                              title=channel_title,
-                              username=channel_username,
-                              is_from_link=is_from_link)
+
+                    logger.info(
+                        "max_channel_found",
+                        original_input=max_channel_id,
+                        channel_id=actual_channel_id,
+                        title=channel_title,
+                        username=channel_username,
+                        is_from_link=is_from_link,
+                    )
                 else:
                     # Не нашли в списке доступных чатов
-                    logger.warning("chat_not_found_in_available", 
-                                 input=max_channel_id,
-                                 link=user_input,
-                                 available_chats_count=len(available_chats))
+                    logger.warning(
+                        "chat_not_found_in_available",
+                        input=max_channel_id,
+                        link=user_input,
+                        available_chats_count=len(available_chats),
+                    )
                     await max_client.close()
-                    
+
                     error_msg = (
                         f"❌ Не удалось найти канал по ссылке '{user_input}'.\n\n"
-                            "Возможные причины:\n"
-                            "• Бот не добавлен в канал как администратор\n"
-                            "• Ссылка указана неверно\n"
-                            "• Канал не существует или недоступен\n\n"
-                            "Убедитесь, что:\n"
-                            "1. Бот добавлен в канал как администратор\n"
-                            "2. Ссылка на канал указана правильно (https://max.ru/username)\n"
-                            "3. Канал существует в MAX"
-                        )
-                    
+                        "Возможные причины:\n"
+                        "• Бот не добавлен в канал как администратор\n"
+                        "• Ссылка указана неверно\n"
+                        "• Канал не существует или недоступен\n\n"
+                        "Убедитесь, что:\n"
+                        "1. Бот добавлен в канал как администратор\n"
+                        "2. Ссылка на канал указана правильно (https://max.ru/username)\n"
+                        "3. Канал существует в MAX"
+                    )
+
                     await message.answer(error_msg, reply_markup=get_retry_keyboard("max_channel"))
                     return
-                
+
                 await max_client.close()
-                logger.info("max_channel_info_retrieved", channel_id=actual_channel_id, title=channel_title, username=channel_username)
+                logger.info(
+                    "max_channel_info_retrieved", channel_id=actual_channel_id, title=channel_title, username=channel_username
+                )
             except APIError as e:
                 logger.warning("failed_to_get_max_chat_info", channel_id=max_channel_id, error=str(e))
                 await message.answer(
@@ -821,7 +804,7 @@ async def process_max_channel(message: Message, state: FSMContext):
                     "• Правильность ссылки (https://max.ru/username)\n"
                     "• Что бот добавлен в канал как администратор\n"
                     "• Что канал существует",
-                    reply_markup=get_retry_keyboard("max_channel")
+                    reply_markup=get_retry_keyboard("max_channel"),
                 )
                 return
             except Exception as e:
@@ -829,21 +812,18 @@ async def process_max_channel(message: Message, state: FSMContext):
                 await message.answer(
                     f"❌ Ошибка при получении информации о канале '{user_input}'.\n\n"
                     "Проверьте правильность ссылки на канал.",
-                    reply_markup=get_retry_keyboard("max_channel")
+                    reply_markup=get_retry_keyboard("max_channel"),
                 )
                 return
-            
+
             # Используем actual_channel_id для сохранения
             max_channel = MaxChannel(
-                user_id=user.id,
-                channel_id=actual_channel_id,
-                channel_username=channel_username,
-                channel_title=channel_title
+                user_id=user.id, channel_id=actual_channel_id, channel_username=channel_username, channel_title=channel_title
             )
             session.add(max_channel)
             await session.commit()
             await session.refresh(max_channel)
-        
+
         # Создание связи
         try:
             # КРИТИЧНО: Загружаем telegram_channel из базы для получения channel_id
@@ -851,104 +831,88 @@ async def process_max_channel(message: Message, state: FSMContext):
                 select(TelegramChannel).where(TelegramChannel.id == telegram_channel_id)
             )
             telegram_channel = telegram_channel_result.scalar_one_or_none()
-            
+
             if not telegram_channel:
                 await message.answer(
-                    "❌ Ошибка: Telegram канал не найден в базе данных.",
-                    reply_markup=get_retry_keyboard("add_channel")
+                    "❌ Ошибка: Telegram канал не найден в базе данных.", reply_markup=get_retry_keyboard("add_channel")
                 )
                 logger.error("telegram_channel_not_found_in_db", telegram_channel_id=telegram_channel_id)
                 return
-            
+
             crossposting_link = CrosspostingLink(
-                user_id=user.id,
-                telegram_channel_id=telegram_channel_id,
-                max_channel_id=max_channel.id,
-                is_enabled=True
+                user_id=user.id, telegram_channel_id=telegram_channel_id, max_channel_id=max_channel.id, is_enabled=True
             )
             session.add(crossposting_link)
             await session.commit()
             await session.refresh(crossposting_link)
-            
+
             # КРИТИЧНО: Очищаем кэш для канала при создании связи
             # Используем channel_id из загруженного telegram_channel
             if telegram_channel and telegram_channel.channel_id:
                 cache_key = f"channel_links:{telegram_channel.channel_id}"
                 await delete_cache(cache_key)
-                logger.info("cache_cleared_on_link_creation", channel_id=telegram_channel.channel_id, link_id=crossposting_link.id)
-            
+                logger.info(
+                    "cache_cleared_on_link_creation", channel_id=telegram_channel.channel_id, link_id=crossposting_link.id
+                )
+
             await log_audit(
                 user.id,
                 AuditAction.CREATE_LINK.value,
                 "crossposting_link",
                 crossposting_link.id,
-                {
-                    "telegram_channel_id": telegram_channel_id,
-                    "max_channel_id": max_channel.id
-                }
+                {"telegram_channel_id": telegram_channel_id, "max_channel_id": max_channel.id},
             )
-            
+
             await message.answer(
-                f"✅ Связь создана успешно!\n\n"
-                f"Кросспостинг активирован.",
-                reply_markup=get_main_keyboard()
+                f"✅ Связь создана успешно!\n\n" f"Кросспостинг активирован.", reply_markup=get_main_keyboard()
             )
-            
+
             # Отправляем предложение миграции
             migration_text = (
                 "Перед началом работы вы можете один раз перенести последние 30 постов из Telegram-канала в MAX-канал."
             )
             migration_keyboard = get_migration_offer_keyboard(crossposting_link.id)
-            await message.answer(
-                migration_text,
-                reply_markup=migration_keyboard
-            )
-            
-            logger.info(
-                "crossposting_link_created",
-                link_id=crossposting_link.id,
-                user_id=user.id
-            )
+            await message.answer(migration_text, reply_markup=migration_keyboard)
+
+            logger.info("crossposting_link_created", link_id=crossposting_link.id, user_id=user.id)
         except Exception as e:
             error_message = str(e)
             error_type = type(e).__name__
-            
+
             # Безопасно получаем ID каналов для логирования
-            tg_ch_id = telegram_channel_id if 'telegram_channel_id' in locals() else None
-            max_ch_id = max_channel.id if 'max_channel' in locals() else None
-            
+            tg_ch_id = telegram_channel_id if "telegram_channel_id" in locals() else None
+            max_ch_id = max_channel.id if "max_channel" in locals() else None
+
             # Определяем тип ошибки для более информативного сообщения
-            if "uq_telegram_max_channels" in error_message or "unique constraint" in error_message.lower() or "duplicate" in error_message.lower():
+            if (
+                "uq_telegram_max_channels" in error_message
+                or "unique constraint" in error_message.lower()
+                or "duplicate" in error_message.lower()
+            ):
                 user_message = (
                     "❌ Такая связь уже существует.\n\n"
                     "Эта комбинация Telegram и MAX каналов уже связана.\n"
                     "Используйте /list_channels для просмотра существующих связей."
                 )
             elif "foreign key" in error_message.lower() or "constraint" in error_message.lower():
-                user_message = (
-                    "❌ Ошибка при создании связи.\n\n"
-                    "Проверьте, что оба канала существуют в системе."
-                )
+                user_message = "❌ Ошибка при создании связи.\n\n" "Проверьте, что оба канала существуют в системе."
             else:
                 user_message = (
                     f"❌ Ошибка при создании связи.\n\n"
                     f"Тип ошибки: {error_type}\n"
                     "Попробуйте позже или обратитесь в поддержку."
                 )
-            
-            await message.answer(
-                user_message,
-                reply_markup=get_retry_keyboard("add_channel")
-            )
+
+            await message.answer(user_message, reply_markup=get_retry_keyboard("add_channel"))
             logger.error(
                 "failed_to_create_link",
                 error=error_message,
                 error_type=error_type,
                 telegram_channel_id=tg_ch_id,
                 max_channel_id=max_ch_id,
-                exc_info=True
+                exc_info=True,
             )
-        
+
         await state.clear()
 
 
@@ -969,26 +933,23 @@ async def show_channels_list(message: Message, state: FSMContext = None, page: i
     """Показать список связей с клавиатурой."""
     telegram_user_id = message.from_user.id
     username = message.from_user.username
-    
+
     user = await get_or_create_user(telegram_user_id, username)
-    
+
     async with async_session_maker() as session:
         result = await session.execute(
             select(CrosspostingLink)
-            .options(
-                selectinload(CrosspostingLink.telegram_channel),
-                selectinload(CrosspostingLink.max_channel)
-            )
+            .options(selectinload(CrosspostingLink.telegram_channel), selectinload(CrosspostingLink.max_channel))
             .where(CrosspostingLink.user_id == user.id)
             .order_by(CrosspostingLink.created_at.desc())
         )
         links = result.scalars().all()
-        
+
         if not links:
             text = "У вас пока нет созданных связей. Используйте кнопку «➕ Добавить связь» для создания."
             await message.answer(text, reply_markup=get_back_to_menu_keyboard())
             return
-        
+
         # Подготовка данных для клавиатуры
         links_data = []
         button_to_link_id = {}  # Маппинг текста кнопки -> link_id
@@ -1000,34 +961,27 @@ async def show_channels_list(message: Message, state: FSMContext = None, page: i
             telegram_short = telegram_title[:20] + "..." if len(telegram_title) > 20 else telegram_title
             max_short = max_title[:20] + "..." if len(max_title) > 20 else max_title
             button_text = f"{status_icon} {telegram_short} - {max_short}"
-            
-            links_data.append({
-                "id": link.id,
-                "telegram_title": telegram_title,
-                "max_title": max_title,
-                "is_enabled": link.is_enabled
-            })
+
+            links_data.append(
+                {"id": link.id, "telegram_title": telegram_title, "max_title": max_title, "is_enabled": link.is_enabled}
+            )
             button_to_link_id[button_text] = link.id
-        
+
         text = "📋 Ваши связи каналов:\n\nВыберите связь для управления:"
         keyboard = get_channels_list_keyboard(links_data, page=page)
-        
+
         if state:
             await state.set_state(LinkManagementStates.viewing_channels_list)
-            await state.update_data(
-                channels_list_page=page, 
-                links_data=links_data,
-                button_to_link_id=button_to_link_id
-            )
+            await state.update_data(channels_list_page=page, links_data=links_data, button_to_link_id=button_to_link_id)
             logger.info(
                 "channels_list_shown",
                 user_id=message.from_user.id,
                 page=page,
                 total_links=len(links),
                 mapping_size=len(button_to_link_id),
-                sample_keys=list(button_to_link_id.keys())[:3] if button_to_link_id else []
+                sample_keys=list(button_to_link_id.keys())[:3] if button_to_link_id else [],
             )
-        
+
         await message.answer(text, reply_markup=keyboard)
 
 
@@ -1037,17 +991,19 @@ async def message_list_channels_nav(message: Message, state: FSMContext):
     data = await state.get_data()
     current_page = data.get("channels_list_page", 0)
     links_data = data.get("links_data", [])
-    
+
     if not links_data:
-        await message.answer("Список связей не найден. Используйте кнопку «📋 Список связей».", reply_markup=get_main_keyboard())
+        await message.answer(
+            "Список связей не найден. Используйте кнопку «📋 Список связей».", reply_markup=get_main_keyboard()
+        )
         return
-    
+
     per_page = 5
     if message.text == "◀️ Назад":
         new_page = max(0, current_page - 1)
     else:  # "Вперед ▶️"
         new_page = min((len(links_data) - 1) // per_page, current_page + 1)
-    
+
     await state.update_data(channels_list_page=new_page)
     await show_channels_list(message, state, page=new_page)
 
@@ -1055,23 +1011,20 @@ async def message_list_channels_nav(message: Message, state: FSMContext):
 async def show_link_detail(message: Message, state: FSMContext, link_id: int):
     """Показать детали связи."""
     user = await get_or_create_user(message.from_user.id, message.from_user.username)
-    
+
     async with async_session_maker() as session:
         result = await session.execute(
             select(CrosspostingLink)
-            .options(
-                selectinload(CrosspostingLink.telegram_channel),
-                selectinload(CrosspostingLink.max_channel)
-            )
+            .options(selectinload(CrosspostingLink.telegram_channel), selectinload(CrosspostingLink.max_channel))
             .where(CrosspostingLink.id == link_id)
             .where(CrosspostingLink.user_id == user.id)
         )
         link = result.scalar_one_or_none()
-        
+
         if not link:
             await message.answer("Связь не найдена.")
             return
-        
+
         # Статистика по связи
         success_count = await session.execute(
             select(func.count(MessageLog.id))
@@ -1083,7 +1036,7 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
             .where(MessageLog.crossposting_link_id == link.id)
             .where(MessageLog.status == MessageStatus.FAILED.value)
         )
-        
+
         # Последняя успешная отправка
         last_success = await session.execute(
             select(MessageLog)
@@ -1093,7 +1046,7 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
             .limit(1)
         )
         last_success_msg = last_success.scalar_one_or_none()
-        
+
         status_icon = "✅" if link.is_enabled else "❌"
         text = (
             f"{status_icon} Связь {link.telegram_channel.channel_title} - {link.max_channel.channel_title}\n\n"
@@ -1105,10 +1058,10 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
             f"Успешных: {success_count.scalar() or 0}\n"
             f"Неудачных: {failed_count.scalar() or 0}"
         )
-        
+
         if last_success_msg:
             text += f"\n\nПоследняя отправка: {last_success_msg.sent_at.strftime('%Y-%m-%d %H:%M:%S')}"
-        
+
         keyboard = get_link_detail_keyboard(link_id, link.is_enabled)
         await state.set_state(LinkManagementStates.viewing_link_detail)
         await state.update_data(current_link_id=link_id)
@@ -1116,52 +1069,45 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
         logger.info("link_detail_shown", link_id=link_id, user_id=user.id)
 
 
-@router.message(
-    LinkManagementStates.viewing_channels_list,
-    F.text.startswith("✅") | F.text.startswith("❌")
-)
+@router.message(LinkManagementStates.viewing_channels_list, F.text.startswith("✅") | F.text.startswith("❌"))
 async def message_link_selected(message: Message, state: FSMContext):
     """Обработчик выбора связи из списка."""
-    logger.info(
-        "message_link_selected_called",
-        user_id=message.from_user.id,
-        message_text=message.text
-    )
-    
+    logger.info("message_link_selected_called", user_id=message.from_user.id, message_text=message.text)
+
     # Проверяем, что текст содержит " - " (формат кнопки связи)
     if not message.text or " - " not in message.text:
         logger.info("message_link_selected_skipped_no_dash", user_id=message.from_user.id, message_text=message.text)
         return
-    
+
     data = await state.get_data()
     button_to_link_id = data.get("button_to_link_id", {})
-    
+
     logger.info(
         "link_selection_attempt",
         user_id=message.from_user.id,
         message_text=message.text,
         has_mapping=bool(button_to_link_id),
-        mapping_keys=list(button_to_link_id.keys())[:3] if button_to_link_id else []
+        mapping_keys=list(button_to_link_id.keys())[:3] if button_to_link_id else [],
     )
-    
+
     if not button_to_link_id:
         # Если маппинг не найден, возможно пользователь не в списке связей
         logger.warning("link_selection_no_mapping", user_id=message.from_user.id, message_text=message.text)
         return
-    
+
     # Ищем link_id по тексту кнопки
     link_id = button_to_link_id.get(message.text)
-    
+
     if not link_id:
         # Текст не соответствует ни одной кнопке из списка
         logger.warning(
             "link_selection_not_found",
             user_id=message.from_user.id,
             message_text=message.text,
-            available_keys=list(button_to_link_id.keys())[:5]
+            available_keys=list(button_to_link_id.keys())[:5],
         )
         return
-    
+
     logger.info("link_selected", user_id=message.from_user.id, link_id=link_id, message_text=message.text)
     await show_link_detail(message, state, link_id)
 
@@ -1179,7 +1125,7 @@ async def cmd_status(message: Message):
             return
         except ValueError:
             pass
-    
+
     await show_status(message)
 
 
@@ -1193,19 +1139,16 @@ async def show_status(message: Message):
     """Показать общий статус кросспостинга."""
     telegram_user_id = message.from_user.id
     username = message.from_user.username
-    
+
     user = await get_or_create_user(telegram_user_id, username)
-    
+
     async with async_session_maker() as session:
-        result = await session.execute(
-            select(CrosspostingLink)
-            .where(CrosspostingLink.user_id == user.id)
-        )
+        result = await session.execute(select(CrosspostingLink).where(CrosspostingLink.user_id == user.id))
         links = result.scalars().all()
-        
+
         active_count = sum(1 for link in links if link.is_enabled)
         inactive_count = len(links) - active_count
-        
+
         # Подсчет статистики отправок
         success_count = await session.execute(
             select(func.count(MessageLog.id))
@@ -1219,7 +1162,7 @@ async def show_status(message: Message):
             .where(CrosspostingLink.user_id == user.id)
             .where(MessageLog.status == MessageStatus.FAILED.value)
         )
-        
+
         text = (
             f"📊 Статус кросспостинга:\n\n"
             f"Активных связей: {active_count}\n"
@@ -1229,7 +1172,7 @@ async def show_status(message: Message):
             f"Неудачных отправок: {failed_count.scalar() or 0}\n\n"
             f"Используйте список связей для детальной информации."
         )
-        
+
         await message.answer(text, reply_markup=get_back_to_menu_keyboard())
 
 
@@ -1237,16 +1180,14 @@ async def cmd_status_detail(message: Message, user: User, link_id: int):
     """Детальный статус связи."""
     async with async_session_maker() as session:
         result = await session.execute(
-            select(CrosspostingLink)
-            .where(CrosspostingLink.id == link_id)
-            .where(CrosspostingLink.user_id == user.id)
+            select(CrosspostingLink).where(CrosspostingLink.id == link_id).where(CrosspostingLink.user_id == user.id)
         )
         link = result.scalar_one_or_none()
-        
+
         if not link:
             await message.answer("Связь не найдена.")
             return
-        
+
         # Статистика по связи
         success_count = await session.execute(
             select(func.count(MessageLog.id))
@@ -1258,7 +1199,7 @@ async def cmd_status_detail(message: Message, user: User, link_id: int):
             .where(MessageLog.crossposting_link_id == link.id)
             .where(MessageLog.status == MessageStatus.FAILED.value)
         )
-        
+
         # Последняя успешная отправка
         last_success = await session.execute(
             select(MessageLog)
@@ -1268,7 +1209,7 @@ async def cmd_status_detail(message: Message, user: User, link_id: int):
             .limit(1)
         )
         last_success_msg = last_success.scalar_one_or_none()
-        
+
         # Последняя ошибка
         last_error = await session.execute(
             select(MessageLog)
@@ -1278,7 +1219,7 @@ async def cmd_status_detail(message: Message, user: User, link_id: int):
             .limit(1)
         )
         last_error_msg = last_error.scalar_one_or_none()
-        
+
         status_icon = "✅" if link.is_enabled else "❌"
         text = (
             f"{status_icon} Связь #{link.id}\n\n"
@@ -1289,13 +1230,13 @@ async def cmd_status_detail(message: Message, user: User, link_id: int):
             f"Успешных: {success_count.scalar() or 0}\n"
             f"Неудачных: {failed_count.scalar() or 0}\n\n"
         )
-        
+
         if last_success_msg:
             text += f"Последняя отправка: {last_success_msg.sent_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        
+
         if last_error_msg:
             text += f"\nПоследняя ошибка:\n{last_error_msg.error_message[:200]}\n"
-        
+
         await message.answer(text)
 
 
@@ -1306,46 +1247,44 @@ async def cmd_enable(message: Message):
     if len(command_parts) < 2:
         await message.answer("Использование: /enable <link_id>")
         return
-    
+
     try:
         link_id = int(command_parts[1])
     except ValueError:
         await message.answer("Неверный формат ID связи.")
         return
-    
+
     user = await get_or_create_user(message.from_user.id, message.from_user.username)
-    
+
     async with async_session_maker() as session:
         result = await session.execute(
             select(CrosspostingLink)
-            .options(
-                selectinload(CrosspostingLink.telegram_channel)
-            )
+            .options(selectinload(CrosspostingLink.telegram_channel))
             .where(CrosspostingLink.id == link_id)
             .where(CrosspostingLink.user_id == user.id)
         )
         link = result.scalar_one_or_none()
-        
+
         if not link:
             await message.answer("Связь не найдена.")
             return
-        
+
         # КРИТИЧНО: Сохраняем channel_id перед изменением для очистки кэша
         telegram_channel_id_for_cache = None
         if link.telegram_channel:
             telegram_channel_id_for_cache = link.telegram_channel.channel_id
-        
+
         link.is_enabled = True
         await session.commit()
-        
+
         # КРИТИЧНО: Очищаем кэш для канала при изменении статуса связи
         if telegram_channel_id_for_cache:
             cache_key = f"channel_links:{telegram_channel_id_for_cache}"
             await delete_cache(cache_key)
             logger.info("cache_cleared_on_link_enable", channel_id=telegram_channel_id_for_cache, link_id=link_id)
-        
+
         await log_audit(user.id, AuditAction.ENABLE_LINK.value, "crossposting_link", link_id)
-        
+
         await message.answer(f"✅ Кросспостинг для связи #{link_id} включен.")
         logger.info("link_enabled", link_id=link_id, user_id=user.id)
 
@@ -1357,46 +1296,44 @@ async def cmd_disable(message: Message):
     if len(command_parts) < 2:
         await message.answer("Использование: /disable <link_id>")
         return
-    
+
     try:
         link_id = int(command_parts[1])
     except ValueError:
         await message.answer("Неверный формат ID связи.")
         return
-    
+
     user = await get_or_create_user(message.from_user.id, message.from_user.username)
-    
+
     async with async_session_maker() as session:
         result = await session.execute(
             select(CrosspostingLink)
-            .options(
-                selectinload(CrosspostingLink.telegram_channel)
-            )
+            .options(selectinload(CrosspostingLink.telegram_channel))
             .where(CrosspostingLink.id == link_id)
             .where(CrosspostingLink.user_id == user.id)
         )
         link = result.scalar_one_or_none()
-        
+
         if not link:
             await message.answer("Связь не найдена.")
             return
-        
+
         # КРИТИЧНО: Сохраняем channel_id перед изменением для очистки кэша
         telegram_channel_id_for_cache = None
         if link.telegram_channel:
             telegram_channel_id_for_cache = link.telegram_channel.channel_id
-        
+
         link.is_enabled = False
         await session.commit()
-        
+
         # КРИТИЧНО: Очищаем кэш для канала при изменении статуса связи
         if telegram_channel_id_for_cache:
             cache_key = f"channel_links:{telegram_channel_id_for_cache}"
             await delete_cache(cache_key)
             logger.info("cache_cleared_on_link_disable", channel_id=telegram_channel_id_for_cache, link_id=link_id)
-        
+
         await log_audit(user.id, AuditAction.DISABLE_LINK.value, "crossposting_link", link_id)
-        
+
         await message.answer(f"❌ Кросспостинг для связи #{link_id} отключен.")
         logger.info("link_disabled", link_id=link_id, user_id=user.id)
 
@@ -1408,52 +1345,51 @@ async def cmd_delete(message: Message):
     if len(command_parts) < 2:
         await message.answer("Использование: /delete <link_id>")
         return
-    
+
     try:
         link_id = int(command_parts[1])
     except ValueError:
         await message.answer("Неверный формат ID связи.")
         return
-    
+
     user = await get_or_create_user(message.from_user.id, message.from_user.username)
-    
+
     async with async_session_maker() as session:
         result = await session.execute(
-            select(CrosspostingLink)
-            .where(CrosspostingLink.id == link_id)
-            .where(CrosspostingLink.user_id == user.id)
+            select(CrosspostingLink).where(CrosspostingLink.id == link_id).where(CrosspostingLink.user_id == user.id)
         )
         link = result.scalar_one_or_none()
-        
+
         if not link:
             await message.answer("Связь не найдена.")
             return
-        
+
         # КРИТИЧНО: Сохраняем channel_id перед удалением для очистки кэша
         telegram_channel_id_for_cache = None
         if link.telegram_channel:
             await session.refresh(link.telegram_channel)
             telegram_channel_id_for_cache = link.telegram_channel.channel_id
-        
+
         # Сохраняем ID каналов для проверки после удаления
         telegram_channel_id_for_cleanup = link.telegram_channel_id
         max_channel_id_for_cleanup = link.max_channel_id
-        
+
         await session.delete(link)
         await session.commit()
-        
+
         # КРИТИЧНО: Очищаем кэш для канала при удалении связи
         if telegram_channel_id_for_cache:
             cache_key = f"channel_links:{telegram_channel_id_for_cache}"
             await delete_cache(cache_key)
             logger.info("cache_cleared_on_link_delete", channel_id=telegram_channel_id_for_cache, link_id=link_id)
-        
+
         # Очистка неиспользуемых каналов после удаления связи
         async with async_session_maker() as cleanup_session:
             # Проверяем, есть ли еще связи у Telegram канала
             telegram_links_count = await cleanup_session.execute(
-                select(func.count(CrosspostingLink.id))
-                .where(CrosspostingLink.telegram_channel_id == telegram_channel_id_for_cleanup)
+                select(func.count(CrosspostingLink.id)).where(
+                    CrosspostingLink.telegram_channel_id == telegram_channel_id_for_cleanup
+                )
             )
             if telegram_links_count.scalar() == 0:
                 # Нет больше связей - удаляем Telegram канал
@@ -1464,11 +1400,10 @@ async def cmd_delete(message: Message):
                 if tg_channel:
                     await cleanup_session.delete(tg_channel)
                     logger.info("telegram_channel_cleaned_up", channel_id=tg_channel.id, title=tg_channel.channel_title)
-            
+
             # Проверяем, есть ли еще связи у MAX канала
             max_links_count = await cleanup_session.execute(
-                select(func.count(CrosspostingLink.id))
-                .where(CrosspostingLink.max_channel_id == max_channel_id_for_cleanup)
+                select(func.count(CrosspostingLink.id)).where(CrosspostingLink.max_channel_id == max_channel_id_for_cleanup)
             )
             if max_links_count.scalar() == 0:
                 # Нет больше связей - удаляем MAX канал
@@ -1479,13 +1414,14 @@ async def cmd_delete(message: Message):
                 if max_channel:
                     await cleanup_session.delete(max_channel)
                     logger.info("max_channel_cleaned_up", channel_id=max_channel.id, title=max_channel.channel_title)
-            
+
             await cleanup_session.commit()
-        
+
         await log_audit(user.id, AuditAction.DELETE_LINK.value, "crossposting_link", link_id)
-        
+
         await message.answer(f"🗑️ Связь #{link_id} удалена.")
         logger.info("link_deleted", link_id=link_id, user_id=user.id)
+
 
 # ============================================================================
 # Обработчики message для кнопок управления связями
@@ -1497,49 +1433,46 @@ async def message_enable(message: Message, state: FSMContext):
     """Обработчик кнопки включения связи."""
     data = await state.get_data()
     link_id = data.get("current_link_id")
-    
+
     if not link_id:
         await message.answer("Ошибка: не найдена текущая связь.")
         return
-    
+
     user = await get_or_create_user(message.from_user.id, message.from_user.username)
-    
+
     async with async_session_maker() as session:
         result = await session.execute(
             select(CrosspostingLink)
-            .options(
-                selectinload(CrosspostingLink.telegram_channel),
-                selectinload(CrosspostingLink.max_channel)
-            )
+            .options(selectinload(CrosspostingLink.telegram_channel), selectinload(CrosspostingLink.max_channel))
             .where(CrosspostingLink.id == link_id)
             .where(CrosspostingLink.user_id == user.id)
         )
         link = result.scalar_one_or_none()
-        
+
         if not link:
             await message.answer("Связь не найдена.")
             return
-        
+
         if link.is_enabled:
             await message.answer("Связь уже включена.")
             return
-        
+
         # КРИТИЧНО: Сохраняем channel_id перед изменением для очистки кэша
         telegram_channel_id_for_cache = None
         if link.telegram_channel:
             telegram_channel_id_for_cache = link.telegram_channel.channel_id
-        
+
         link.is_enabled = True
         await session.commit()
-        
+
         # КРИТИЧНО: Очищаем кэш для канала при изменении статуса связи
         if telegram_channel_id_for_cache:
             cache_key = f"channel_links:{telegram_channel_id_for_cache}"
             await delete_cache(cache_key)
             logger.info("cache_cleared_on_link_enable", channel_id=telegram_channel_id_for_cache, link_id=link_id)
-        
+
         await log_audit(user.id, AuditAction.ENABLE_LINK.value, "crossposting_link", link_id)
-        
+
         # Обновляем сообщение
         status_icon = "✅"
         text = (
@@ -1550,7 +1483,7 @@ async def message_enable(message: Message, state: FSMContext):
             f"Статус: Активна\n"
             f"Создана: {link.created_at.strftime('%Y-%m-%d %H:%M')}"
         )
-        
+
         keyboard = get_link_detail_keyboard(link_id, True)
         await message.answer(text, reply_markup=keyboard)
         logger.info("link_enabled", link_id=link_id, user_id=user.id)
@@ -1561,49 +1494,46 @@ async def message_disable(message: Message, state: FSMContext):
     """Обработчик кнопки отключения связи."""
     data = await state.get_data()
     link_id = data.get("current_link_id")
-    
+
     if not link_id:
         await message.answer("Ошибка: не найдена текущая связь.")
         return
-    
+
     user = await get_or_create_user(message.from_user.id, message.from_user.username)
-    
+
     async with async_session_maker() as session:
         result = await session.execute(
             select(CrosspostingLink)
-            .options(
-                selectinload(CrosspostingLink.telegram_channel),
-                selectinload(CrosspostingLink.max_channel)
-            )
+            .options(selectinload(CrosspostingLink.telegram_channel), selectinload(CrosspostingLink.max_channel))
             .where(CrosspostingLink.id == link_id)
             .where(CrosspostingLink.user_id == user.id)
         )
         link = result.scalar_one_or_none()
-        
+
         if not link:
             await message.answer("Связь не найдена.")
             return
-        
+
         if not link.is_enabled:
             await message.answer("Связь уже отключена.")
             return
-        
+
         # КРИТИЧНО: Сохраняем channel_id перед изменением для очистки кэша
         telegram_channel_id_for_cache = None
         if link.telegram_channel:
             telegram_channel_id_for_cache = link.telegram_channel.channel_id
-        
+
         link.is_enabled = False
         await session.commit()
-        
+
         # КРИТИЧНО: Очищаем кэш для канала при изменении статуса связи
         if telegram_channel_id_for_cache:
             cache_key = f"channel_links:{telegram_channel_id_for_cache}"
             await delete_cache(cache_key)
             logger.info("cache_cleared_on_link_disable", channel_id=telegram_channel_id_for_cache, link_id=link_id)
-        
+
         await log_audit(user.id, AuditAction.DISABLE_LINK.value, "crossposting_link", link_id)
-        
+
         # Обновляем сообщение
         status_icon = "❌"
         text = (
@@ -1614,7 +1544,7 @@ async def message_disable(message: Message, state: FSMContext):
             f"Статус: Неактивна\n"
             f"Создана: {link.created_at.strftime('%Y-%m-%d %H:%M')}"
         )
-        
+
         keyboard = get_link_detail_keyboard(link_id, False)
         await message.answer(text, reply_markup=keyboard)
         logger.info("link_disabled", link_id=link_id, user_id=user.id)
@@ -1625,34 +1555,31 @@ async def message_delete_confirm(message: Message, state: FSMContext):
     """Обработчик кнопки подтверждения удаления."""
     data = await state.get_data()
     link_id = data.get("current_link_id")
-    
+
     logger.info("delete_confirm_clicked", user_id=message.from_user.id, link_id=link_id)
-    
+
     if not link_id:
         await message.answer("Ошибка: не найдена текущая связь.")
         return
-    
+
     user = await get_or_create_user(message.from_user.id, message.from_user.username)
-    
+
     async with async_session_maker() as session:
         result = await session.execute(
             select(CrosspostingLink)
-            .options(
-                selectinload(CrosspostingLink.telegram_channel),
-                selectinload(CrosspostingLink.max_channel)
-            )
+            .options(selectinload(CrosspostingLink.telegram_channel), selectinload(CrosspostingLink.max_channel))
             .where(CrosspostingLink.id == link_id)
             .where(CrosspostingLink.user_id == user.id)
         )
         link = result.scalar_one_or_none()
-        
+
         if not link:
             await message.answer("Связь не найдена.")
             return
-        
+
         await state.update_data(delete_link_id=link_id)
         await state.set_state(LinkManagementStates.confirming_delete)
-        
+
         # Проверяем, что состояние установлено
         verify_state = await state.get_state()
         verify_data = await state.get_data()
@@ -1662,16 +1589,16 @@ async def message_delete_confirm(message: Message, state: FSMContext):
             link_id=link_id,
             state_set=str(verify_state),
             expected_state=str(LinkManagementStates.confirming_delete),
-            state_data=verify_data
+            state_data=verify_data,
         )
-        
+
         text = (
             f"⚠️ Подтвердите удаление связи #{link_id}\n\n"
             f"Telegram: {link.telegram_channel.channel_title}\n"
             f"MAX: {link.max_channel.channel_title}\n\n"
             f"Это действие нельзя отменить!"
         )
-        
+
         keyboard = get_delete_confirm_keyboard(link_id)
         await message.answer(text, reply_markup=keyboard)
         logger.info("delete_confirm_shown", user_id=user.id, link_id=link_id)
@@ -1681,54 +1608,53 @@ async def message_delete_yes(message: Message, state: FSMContext):
     """Обработчик подтвержденного удаления связи."""
     data = await state.get_data()
     link_id = data.get("delete_link_id")
-    
+
     logger.info("delete_yes_clicked", user_id=message.from_user.id, link_id=link_id, state_data=data)
-    
+
     if not link_id:
         await message.answer("Ошибка: не найдена связь для удаления.")
         await state.clear()
         return
-    
+
     user = await get_or_create_user(message.from_user.id, message.from_user.username)
-    
+
     async with async_session_maker() as session:
         result = await session.execute(
-            select(CrosspostingLink)
-            .where(CrosspostingLink.id == link_id)
-            .where(CrosspostingLink.user_id == user.id)
+            select(CrosspostingLink).where(CrosspostingLink.id == link_id).where(CrosspostingLink.user_id == user.id)
         )
         link = result.scalar_one_or_none()
-        
+
         if not link:
             await message.answer("Связь не найдена.")
             await state.clear()
             return
-        
+
         # КРИТИЧНО: Сохраняем channel_id перед удалением для очистки кэша
         telegram_channel_id_for_cache = None
         if link.telegram_channel:
             await session.refresh(link.telegram_channel)
             telegram_channel_id_for_cache = link.telegram_channel.channel_id
-        
+
         # Сохраняем ID каналов для проверки после удаления
         telegram_channel_id_for_cleanup = link.telegram_channel_id
         max_channel_id_for_cleanup = link.max_channel_id
-        
+
         await session.delete(link)
         await session.commit()
-        
+
         # КРИТИЧНО: Очищаем кэш для канала при удалении связи
         if telegram_channel_id_for_cache:
             cache_key = f"channel_links:{telegram_channel_id_for_cache}"
             await delete_cache(cache_key)
             logger.info("cache_cleared_on_link_delete", channel_id=telegram_channel_id_for_cache, link_id=link_id)
-        
+
         # Очистка неиспользуемых каналов после удаления связи
         async with async_session_maker() as cleanup_session:
             # Проверяем, есть ли еще связи у Telegram канала
             telegram_links_count = await cleanup_session.execute(
-                select(func.count(CrosspostingLink.id))
-                .where(CrosspostingLink.telegram_channel_id == telegram_channel_id_for_cleanup)
+                select(func.count(CrosspostingLink.id)).where(
+                    CrosspostingLink.telegram_channel_id == telegram_channel_id_for_cleanup
+                )
             )
             if telegram_links_count.scalar() == 0:
                 # Нет больше связей - удаляем Telegram канал
@@ -1739,11 +1665,10 @@ async def message_delete_yes(message: Message, state: FSMContext):
                 if tg_channel:
                     await cleanup_session.delete(tg_channel)
                     logger.info("telegram_channel_cleaned_up", channel_id=tg_channel.id, title=tg_channel.channel_title)
-            
+
             # Проверяем, есть ли еще связи у MAX канала
             max_links_count = await cleanup_session.execute(
-                select(func.count(CrosspostingLink.id))
-                .where(CrosspostingLink.max_channel_id == max_channel_id_for_cleanup)
+                select(func.count(CrosspostingLink.id)).where(CrosspostingLink.max_channel_id == max_channel_id_for_cleanup)
             )
             if max_links_count.scalar() == 0:
                 # Нет больше связей - удаляем MAX канал
@@ -1754,11 +1679,11 @@ async def message_delete_yes(message: Message, state: FSMContext):
                 if max_channel:
                     await cleanup_session.delete(max_channel)
                     logger.info("max_channel_cleaned_up", channel_id=max_channel.id, title=max_channel.channel_title)
-            
+
             await cleanup_session.commit()
-        
+
         await log_audit(user.id, AuditAction.DELETE_LINK.value, "crossposting_link", link_id)
-        
+
         text = f"🗑️ Связь #{link_id} удалена."
         keyboard = get_back_to_menu_keyboard()
         await message.answer(text, reply_markup=keyboard)
@@ -1770,9 +1695,9 @@ async def message_delete_cancel(message: Message, state: FSMContext):
     """Обработчик кнопки 'Отмена' при подтверждении удаления."""
     data = await state.get_data()
     link_id = data.get("delete_link_id")
-    
+
     logger.info("delete_cancelled", user_id=message.from_user.id, link_id=link_id)
-    
+
     if link_id:
         # Возвращаемся к деталям связи
         await show_link_detail(message, state, link_id)
@@ -1799,42 +1724,40 @@ async def callback_migrate_link(callback: CallbackQuery, state: FSMContext):
     if not match:
         await callback.answer("Ошибка: не удалось определить ID связи.", show_alert=True)
         return
-    
+
     link_id = int(match.group(1))
     user = await get_or_create_user(callback.from_user.id, callback.from_user.username)
-    
+
     # Проверяем, что связь принадлежит пользователю
     async with async_session_maker() as session:
         result = await session.execute(
             select(CrosspostingLink)
-            .options(
-                selectinload(CrosspostingLink.telegram_channel),
-                selectinload(CrosspostingLink.max_channel)
-            )
+            .options(selectinload(CrosspostingLink.telegram_channel), selectinload(CrosspostingLink.max_channel))
             .where(CrosspostingLink.id == link_id)
             .where(CrosspostingLink.user_id == user.id)
         )
         link = result.scalar_one_or_none()
-        
+
         if not link:
             await callback.answer("Связь не найдена или у вас нет доступа к ней.", show_alert=True)
             return
-    
+
     # Удаляем сообщение с кнопками
     try:
         await callback.message.delete()
     except Exception as e:
         logger.warning("failed_to_delete_migration_offer_message", error=str(e))
-    
+
     # Подтверждаем нажатие кнопки
     await callback.answer()
-    
+
     # Запускаем миграцию в фоне
     await state.set_state(MigrateStates.migrating)
     await state.update_data(migrate_link_id=link_id)
-    
+
     # Отправляем уведомление о начале
     from app.bot.handlers_migration import start_migration
+
     start_text = (
         f"⚠️ Начинается перенос старых постов\n\n"
         f"Telegram: {link.telegram_channel.channel_title}\n"
@@ -1845,7 +1768,7 @@ async def callback_migrate_link(callback: CallbackQuery, state: FSMContext):
         f"⏳ Начинаю перенос, вы получите уведомление по окончании переноса"
     )
     await callback.message.answer(start_text, reply_markup=get_stop_migration_keyboard())
-    
+
     # Запускаем миграцию в фоне
     asyncio.create_task(start_migration(link_id, callback.from_user.id, callback.message.chat.id))
 
@@ -1859,5 +1782,3 @@ async def callback_migrate_dismiss(callback: CallbackQuery):
     except Exception as e:
         logger.warning("failed_to_delete_migration_offer_message", error=str(e))
         await callback.answer("Сообщение удалено.")
-
-

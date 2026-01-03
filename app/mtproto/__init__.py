@@ -1,11 +1,1 @@
 """Telegram MTProto Receiver."""
-
-
-
-
-
-
-
-
-
-

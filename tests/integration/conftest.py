@@ -1,4 +1,5 @@
 """Конфигурация для интеграционных тестов."""
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -10,4 +11,3 @@ def api_client():
     # from admin_panel.backend.main import app
     # return TestClient(app)
     pass
-

@@ -1,4 +1,5 @@
 """Модели базы данных."""
+
 from app.models.user import User
 from app.models.telegram_channel import TelegramChannel
 from app.models.max_channel import MaxChannel
@@ -16,13 +17,3 @@ __all__ = [
     "FailedMessage",
     "AuditLog",
 ]
-
-
-
-
-
-
-
-
-
-

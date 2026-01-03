@@ -1,4 +1,5 @@
 """Точка входа для MTProto Receiver."""
+
 import asyncio
 import signal
 from app.mtproto.receiver import MTProtoReceiver
@@ -11,7 +12,7 @@ logger = get_logger(__name__)
 def main():
     """Главная функция для запуска MTProto Receiver."""
     receiver = MTProtoReceiver()
-    
+
     try:
         # Запускаем receiver
         asyncio.run(receiver.run())

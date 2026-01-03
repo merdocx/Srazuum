@@ -1,9 +1,11 @@
 """Перечисления для статусов и типов."""
+
 from enum import Enum
 
 
 class MessageStatus(str, Enum):
     """Статусы сообщений."""
+
     PENDING = "pending"
     SUCCESS = "success"
     FAILED = "failed"
@@ -11,6 +13,7 @@ class MessageStatus(str, Enum):
 
 class MessageType(str, Enum):
     """Типы сообщений."""
+
     TEXT = "text"
     PHOTO = "photo"
     VIDEO = "video"
@@ -26,18 +29,9 @@ class MessageType(str, Enum):
 
 class AuditAction(str, Enum):
     """Действия в аудите."""
+
     CREATE_LINK = "create_link"
     DELETE_LINK = "delete_link"
     ENABLE_LINK = "enable_link"
     DISABLE_LINK = "disable_link"
     UPDATE_LINK = "update_link"
-
-
-
-
-
-
-
-
-
-

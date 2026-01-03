@@ -1,4 +1,5 @@
 """Тесты для конвертации chat_id."""
+
 import pytest
 from app.utils.chat_id_converter import convert_chat_id
 
@@ -54,4 +55,3 @@ def test_convert_chat_id_zero():
     chat_id = 0
     result = convert_chat_id(chat_id)
     assert result == 0
-

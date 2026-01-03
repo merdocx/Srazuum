@@ -1,4 +1,5 @@
 """Интерактивная авторизация MTProto - запрашивает код и сразу ждет ввода."""
+
 import asyncio
 import sys
 from pyrogram import Client
@@ -16,14 +17,14 @@ async def authorize_interactive():
     print(f"\nНомер телефона: {settings.telegram_phone}")
     print(f"API ID: {settings.telegram_api_id}")
     print("\nПодключение к Telegram...")
-    
+
     client = Client(
         "crossposting_session",
         api_id=settings.telegram_api_id_int,
         api_hash=settings.telegram_api_hash,
-        phone_number=settings.telegram_phone
+        phone_number=settings.telegram_phone,
     )
-    
+
     try:
         # Используем интерактивный режим Pyrogram
         # Он сам запросит код и будет ждать ввода в том же процессе
@@ -32,38 +33,39 @@ async def authorize_interactive():
         print("\n⏳ Ожидание кода...")
         print("   Когда код придет в Telegram/SMS, введите его ниже:")
         print("")
-        
+
         await client.start()
-        
+
         print("\n" + "=" * 60)
         print("✅ Авторизация успешна!")
         print("=" * 60)
         print("\nФайл сессии создан: crossposting_session.session")
-        
+
         # Получаем информацию о себе
         me = await client.get_me()
         print(f"\n👤 Авторизован как: {me.first_name}")
         if me.username:
             print(f"   Username: @{me.username}")
         print(f"   Phone: {me.phone_number}")
-        
+
         print("\n🚀 Теперь можно запустить MTProto как сервис:")
         print("  sudo systemctl enable --now crossposting-mtproto")
         print("=" * 60)
-        
+
         await client.stop()
         return True
-        
+
     except KeyboardInterrupt:
         print("\n\nАвторизация отменена")
         return False
     except Exception as e:
         error_str = str(e)
         print(f"\n❌ Ошибка: {error_str}")
-        
+
         if "FLOOD_WAIT" in error_str:
             import re
-            wait_match = re.search(r'FLOOD_WAIT_(\d+)', error_str)
+
+            wait_match = re.search(r"FLOOD_WAIT_(\d+)", error_str)
             if wait_match:
                 wait_seconds = int(wait_match.group(1))
                 wait_minutes = wait_seconds // 60
@@ -86,7 +88,7 @@ async def authorize_interactive():
         elif "EOF" in error_str:
             print("\n⚠️  Не удалось получить ввод кода")
             print("💡 Убедитесь, что запускаете скрипт в интерактивном терминале")
-        
+
         return False
 
 

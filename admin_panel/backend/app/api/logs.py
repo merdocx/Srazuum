@@ -1,4 +1,5 @@
 """API для логов."""
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -22,32 +23,32 @@ async def get_message_logs(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     current_admin: Admin = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """Получить логи сообщений."""
     try:
         query = select(MessageLog)
-        
+
         if link_id:
             query = query.where(MessageLog.crossposting_link_id == link_id)
         if status:
             query = query.where(MessageLog.status == status)
         if start_date:
-            start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            start = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
             query = query.where(MessageLog.created_at >= start)
         if end_date:
-            end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            end = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
             query = query.where(MessageLog.created_at <= end)
-        
+
         # Общее количество
         count_result = await db.execute(select(func.count(MessageLog.id)).select_from(query.subquery()))
         total = count_result.scalar() or 0
-        
+
         # Данные с пагинацией
         query = query.order_by(MessageLog.created_at.desc()).offset(skip).limit(limit)
         result = await db.execute(query)
         logs = result.scalars().all()
-        
+
         logs_data = [
             {
                 "id": log.id,
@@ -64,39 +65,26 @@ async def get_message_logs(
             }
             for log in logs
         ]
-        
-        return {
-            "total": total,
-            "skip": skip,
-            "limit": limit,
-            "data": logs_data
-        }
+
+        return {"total": total, "skip": skip, "limit": limit, "data": logs_data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка получения логов: {str(e)}")
 
 
 @router.get("/messages/{log_id}")
-async def get_message_log(
-    log_id: int,
-    current_admin: Admin = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db)
-):
+async def get_message_log(log_id: int, current_admin: Admin = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     """Получить детальную информацию о логе сообщения."""
     try:
-        result = await db.execute(
-            select(MessageLog).where(MessageLog.id == log_id)
-        )
+        result = await db.execute(select(MessageLog).where(MessageLog.id == log_id))
         log = result.scalar_one_or_none()
-        
+
         if not log:
             raise HTTPException(status_code=404, detail="Лог не найден")
-        
+
         # Получаем связь
-        link_result = await db.execute(
-            select(CrosspostingLink).where(CrosspostingLink.id == log.crossposting_link_id)
-        )
+        link_result = await db.execute(select(CrosspostingLink).where(CrosspostingLink.id == log.crossposting_link_id))
         link = link_result.scalar_one_or_none()
-        
+
         return {
             "id": log.id,
             "crossposting_link_id": log.crossposting_link_id,
@@ -109,10 +97,14 @@ async def get_message_log(
             "processing_time_ms": log.processing_time_ms,
             "created_at": log.created_at,
             "sent_at": log.sent_at,
-            "link": {
-                "id": link.id,
-                "is_enabled": link.is_enabled,
-            } if link else None,
+            "link": (
+                {
+                    "id": link.id,
+                    "is_enabled": link.is_enabled,
+                }
+                if link
+                else None
+            ),
         }
     except HTTPException:
         raise
@@ -127,12 +119,12 @@ async def get_failed_messages(
     link_id: Optional[int] = None,
     resolved: Optional[bool] = None,
     current_admin: Admin = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """Получить список неудачных сообщений."""
     try:
         query = select(FailedMessage)
-        
+
         if link_id:
             query = query.where(FailedMessage.crossposting_link_id == link_id)
         if resolved is not None:
@@ -140,16 +132,16 @@ async def get_failed_messages(
                 query = query.where(FailedMessage.resolved_at.isnot(None))
             else:
                 query = query.where(FailedMessage.resolved_at.is_(None))
-        
+
         # Общее количество
         count_result = await db.execute(select(func.count(FailedMessage.id)).select_from(query.subquery()))
         total = count_result.scalar() or 0
-        
+
         # Данные с пагинацией
         query = query.order_by(FailedMessage.created_at.desc()).offset(skip).limit(limit)
         result = await db.execute(query)
         failed_messages = result.scalars().all()
-        
+
         failed_data = [
             {
                 "id": fm.id,
@@ -164,13 +156,8 @@ async def get_failed_messages(
             }
             for fm in failed_messages
         ]
-        
-        return {
-            "total": total,
-            "skip": skip,
-            "limit": limit,
-            "data": failed_data
-        }
+
+        return {"total": total, "skip": skip, "limit": limit, "data": failed_data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка получения неудачных сообщений: {str(e)}")
 
@@ -184,32 +171,32 @@ async def get_audit_logs(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     current_admin: Admin = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """Получить логи аудита."""
     try:
         query = select(AuditLog)
-        
+
         if user_id:
             query = query.where(AuditLog.user_id == user_id)
         if action:
             query = query.where(AuditLog.action == action)
         if start_date:
-            start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            start = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
             query = query.where(AuditLog.created_at >= start)
         if end_date:
-            end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            end = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
             query = query.where(AuditLog.created_at <= end)
-        
+
         # Общее количество
         count_result = await db.execute(select(func.count(AuditLog.id)).select_from(query.subquery()))
         total = count_result.scalar() or 0
-        
+
         # Данные с пагинацией
         query = query.order_by(AuditLog.created_at.desc()).offset(skip).limit(limit)
         result = await db.execute(query)
         logs = result.scalars().all()
-        
+
         logs_data = [
             {
                 "id": log.id,
@@ -222,12 +209,7 @@ async def get_audit_logs(
             }
             for log in logs
         ]
-        
-        return {
-            "total": total,
-            "skip": skip,
-            "limit": limit,
-            "data": logs_data
-        }
+
+        return {"total": total, "skip": skip, "limit": limit, "data": logs_data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка получения логов аудита: {str(e)}")

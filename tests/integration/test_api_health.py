@@ -1,4 +1,5 @@
 """Тесты для API health checks."""
+
 import pytest
 import httpx
 from fastapi.testclient import TestClient
@@ -17,4 +18,3 @@ def test_health_detailed_endpoint():
     """Тест детального health check endpoint."""
     # Это интеграционный тест, требует запущенного сервера
     pass  # TODO: Реализовать когда будет настроен TestClient
-

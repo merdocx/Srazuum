@@ -1,4 +1,5 @@
 """Простой скрипт авторизации MTProto по шагам."""
+
 import asyncio
 import sys
 import os
@@ -22,39 +23,39 @@ async def step1_request_code():
     print(f"\nНомер телефона: {settings.telegram_phone}")
     print(f"API ID: {settings.telegram_api_id}")
     print("\nПодключение к Telegram...")
-    
+
     client = Client(
         "crossposting_session",
         api_id=settings.telegram_api_id_int,
         api_hash=settings.telegram_api_hash,
-        phone_number=settings.telegram_phone
+        phone_number=settings.telegram_phone,
     )
-    
+
     try:
         await client.connect()
         print("✅ Подключено к Telegram")
-        
+
         print("\n📱 Запрос кода подтверждения...")
         print(f"   Номер телефона: {settings.telegram_phone}")
         print(f"   API ID: {settings.telegram_api_id}")
-        
+
         try:
             sent_code = await client.send_code(settings.telegram_phone)
-            
+
             print("✅ Код подтверждения отправлен!")
             print(f"   Способ доставки: {sent_code.type}")
             print(f"   Номер телефона: {settings.telegram_phone}")
-            
+
             # Дополнительная информация о способе доставки
-            if hasattr(sent_code.type, 'pattern'):
+            if hasattr(sent_code.type, "pattern"):
                 print(f"   Паттерн SMS: {sent_code.type.pattern}")
-            if hasattr(sent_code.type, 'length'):
+            if hasattr(sent_code.type, "length"):
                 print(f"   Длина кода: {sent_code.type.length}")
-                
+
         except Exception as e:
             error_str = str(e)
             print(f"\n❌ Ошибка при запросе кода: {error_str}")
-            
+
             # Детальная диагностика ошибки
             if "PHONE_NUMBER_INVALID" in error_str:
                 print("\n⚠️  Неверный номер телефона")
@@ -67,39 +68,41 @@ async def step1_request_code():
                 print("\n⚠️  Номер телефона заблокирован")
             elif "FLOOD_WAIT" in error_str:
                 import re
-                wait_match = re.search(r'FLOOD_WAIT_(\d+)', error_str)
+
+                wait_match = re.search(r"FLOOD_WAIT_(\d+)", error_str)
                 if wait_match:
                     wait_seconds = int(wait_match.group(1))
                     wait_minutes = wait_seconds // 60
                     print(f"\n⚠️  Блокировка: подождите {wait_minutes} минут")
             else:
                 print(f"\n⚠️  Неизвестная ошибка: {error_str}")
-            
+
             raise
-        
+
         # Сохраняем phone_code_hash для следующего шага
         print(f"\n💾 Сохранение phone_code_hash: {PHONE_CODE_HASH_FILE}")
         with open(PHONE_CODE_HASH_FILE, "w") as f:
             f.write(sent_code.phone_code_hash)
         print(f"✅ phone_code_hash сохранен: {sent_code.phone_code_hash[:10]}...")
-        
+
         print("\n" + "=" * 60)
         print("⏳ Ожидание кода от пользователя...")
         print("=" * 60)
         print("\nПроверьте Telegram или SMS на номере", settings.telegram_phone)
         print("Когда получите код, выполните:")
         print("  python -m app.mtproto.auth <код>")
-        
+
         await client.disconnect()
         return True
-        
+
     except Exception as e:
         error_str = str(e)
         print(f"\n❌ Ошибка: {error_str}")
-        
+
         if "FLOOD_WAIT" in error_str:
             import re
-            wait_match = re.search(r'FLOOD_WAIT_(\d+)', error_str)
+
+            wait_match = re.search(r"FLOOD_WAIT_(\d+)", error_str)
             if wait_match:
                 wait_seconds = int(wait_match.group(1))
                 wait_minutes = wait_seconds // 60
@@ -111,7 +114,7 @@ async def step1_request_code():
                     print(f"Подождите {wait_minutes} минут")
                 else:
                     print(f"Подождите {wait_seconds} секунд")
-        
+
         await client.disconnect()
         return False
 
@@ -123,7 +126,7 @@ async def step2_use_code(code):
     print("=" * 60)
     print(f"\nНомер телефона: {settings.telegram_phone}")
     print(f"Код: {code}")
-    
+
     # Загружаем phone_code_hash
     print(f"\n📂 Загрузка phone_code_hash из: {PHONE_CODE_HASH_FILE}")
     try:
@@ -135,21 +138,21 @@ async def step2_use_code(code):
         print("💡 Сначала выполните ШАГ 1:")
         print("   python -m app.mtproto.auth")
         return False
-    
+
     client = Client(
         "crossposting_session",
         api_id=settings.telegram_api_id_int,
         api_hash=settings.telegram_api_hash,
-        phone_number=settings.telegram_phone
+        phone_number=settings.telegram_phone,
     )
-    
+
     try:
         await client.connect()
         print("✅ Подключено к Telegram")
-        
+
         print(f"\n📝 Использование кода: {code}")
         print("Авторизация...")
-        
+
         # Авторизуемся с кодом
         try:
             print(f"🔐 Попытка авторизации с кодом {code} и hash {phone_code_hash[:10]}...")
@@ -184,38 +187,38 @@ async def step2_use_code(code):
                 return False
             else:
                 raise
-        
+
         # Сохраняем сессию
         print("\n💾 Сохранение сессии...")
         await client.disconnect()
         await client.connect()
         await client.start()  # Это сохранит сессию
-        
+
         print("\n" + "=" * 60)
         print("✅ Авторизация успешна!")
         print("=" * 60)
-        
+
         # Получаем информацию о себе
         me = await client.get_me()
         print(f"\n👤 Авторизован как: {me.first_name}")
         if me.username:
             print(f"   Username: @{me.username}")
         print(f"   Phone: {me.phone_number}")
-        
+
         print("\n📁 Файл сессии создан: crossposting_session.session")
-        
+
         # Удаляем временный файл
         if PHONE_CODE_HASH_FILE.exists():
             PHONE_CODE_HASH_FILE.unlink()
             print("🗑️  Временный файл phone_code_hash удален")
-        
+
         print("\n🚀 Теперь можно запустить MTProto как сервис:")
         print("  sudo systemctl enable --now crossposting-mtproto")
         print("=" * 60)
-        
+
         await client.stop()
         return True
-        
+
     except Exception as e:
         error_str = str(e)
         print(f"\n❌ Ошибка: {error_str}")
@@ -232,5 +235,5 @@ if __name__ == "__main__":
     else:
         # Шаг 1: Запрос кода
         success = asyncio.run(step1_request_code())
-    
+
     sys.exit(0 if success else 1)

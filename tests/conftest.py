@@ -1,4 +1,5 @@
 """Конфигурация pytest."""
+
 import pytest
 import asyncio
 import sys
@@ -13,6 +14,7 @@ sys.path.insert(0, str(project_root))
 
 # Импортируем Base и модели
 from config.database import Base
+
 # Импортируем все модели, чтобы они были зарегистрированы в Base.metadata
 from app.models import User, TelegramChannel, MaxChannel, CrosspostingLink
 
@@ -40,11 +42,11 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
     """Фикстура для тестовой сессии БД."""
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    
+
     async with TestSessionLocal() as session:
         yield session
         await session.rollback()
-    
+
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
 
@@ -55,4 +57,3 @@ def event_loop():
     loop = asyncio.get_event_loop_policy().new_event_loop()
     yield loop
     loop.close()
-
