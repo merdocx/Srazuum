@@ -1,6 +1,6 @@
 """API endpoints для работы с платежами."""
 
-from fastapi import APIRouter, Request, HTTPException, status
+from fastapi import APIRouter, Request, HTTPException, status, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -15,6 +15,9 @@ from config.settings import settings as app_settings
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 logger = get_logger(__name__)
+
+# Период подписки по умолчанию (в днях)
+SUBSCRIPTION_PERIOD_DAYS = 30
 
 
 @router.post("/webhook")
