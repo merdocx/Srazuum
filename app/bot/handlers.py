@@ -917,7 +917,7 @@ async def process_max_channel(message: Message, state: FSMContext):
 
 
 @router.message(Command("list_channels"))
-async def cmd_list_channels(message: Message):
+async def cmd_list_channels(message: Message, state: FSMContext):
     """Обработчик команды /list_channels."""
     await show_channels_list(message, state)
 
