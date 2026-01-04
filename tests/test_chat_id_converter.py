@@ -25,5 +25,5 @@ def test_convert_float():
 
 def test_convert_string_non_numeric():
     """Тест преобразования нечисловой строки."""
-    result = convert_chat_id("abc")
-    assert result == "abc"  # Возвращается как есть
+    with pytest.raises(ValueError, match="Невозможно преобразовать chat_id в int: abc"):
+        convert_chat_id("abc")
