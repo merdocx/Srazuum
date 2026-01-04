@@ -34,7 +34,7 @@ aiosqlite==0.19.0  # для тестовой БД
 
 # Utilities
 # pydantic устанавливается как зависимость aiogram
-# pydantic-settings не нужен, используем BaseSettings из pydantic
+pydantic-settings>=2.0.0  # Требуется для BaseSettings в Pydantic 2.3+
 
 # System monitoring
 psutil==5.9.6
