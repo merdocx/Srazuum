@@ -82,7 +82,7 @@ async def cmd_my_subscriptions(message: Message, state: FSMContext):
     """Показать список всех связей с информацией о подписках."""
     async with async_session_maker() as session:
         # Находим пользователя
-        result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+        result = await session.execute(select(User).where(User.telegram_user_id == message.from_user.id))
         user = result.scalar_one_or_none()
 
         if not user:
@@ -172,7 +172,7 @@ async def cmd_pay_link(message: Message, state: FSMContext):
 
     async with async_session_maker() as session:
         # Находим пользователя
-        result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+        result = await session.execute(select(User).where(User.telegram_user_id == message.from_user.id))
         user = result.scalar_one_or_none()
 
         if not user:
@@ -273,7 +273,7 @@ async def cmd_subscription_info(message: Message, state: FSMContext):
 
     async with async_session_maker() as session:
         # Находим пользователя
-        result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+        result = await session.execute(select(User).where(User.telegram_user_id == message.from_user.id))
         user = result.scalar_one_or_none()
 
         if not user:
