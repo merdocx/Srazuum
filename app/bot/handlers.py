@@ -279,21 +279,20 @@ async def cmd_help(message: Message):
     await message.answer(text, reply_markup=get_back_to_menu_keyboard())
 
 
-@router.message(F.text == "❓ Помощь")
-async def message_help(message: Message):
-    """Обработчик кнопки помощи."""
+@router.message(F.text == "💬 Связаться с поддержкой")
+async def message_support(message: Message, state: FSMContext):
+    """Обработчик кнопки связи с поддержкой."""
+    await state.clear()
+
     text = (
-        "📖 Помощь по использованию бота:\n\n"
-        "Используйте кнопки для управления кросспостингом:\n\n"
-        "➕ Добавить связь - Создать новую связь каналов\n"
-        "📋 Список связей - Просмотр всех ваших связей\n"
-        "📊 Статус - Общая статистика кросспостинга\n\n"
-        "Для управления конкретной связью:\n"
-        "1. Откройте список связей\n"
-        "2. Выберите нужную связь\n"
-        "3. Используйте кнопки для управления"
+        "💬 Связаться с поддержкой\n\n"
+        "Если у вас возникли вопросы или проблемы, напишите нашей поддержке:\n\n"
+        "👉 @vee_support"
     )
-    await message.answer(text, reply_markup=get_back_to_menu_keyboard())
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="💬 Написать в поддержку", url="https://t.me/vee_support")]]
+    )
+    await message.answer(text, reply_markup=keyboard)
 
 
 @router.message(F.text == "🏠 Главное меню")
