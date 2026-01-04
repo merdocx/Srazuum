@@ -1,8 +1,9 @@
 """Тесты для API health checks."""
 
 import pytest
-import httpx
-from fastapi.testclient import TestClient
+# TODO: Раскомментировать когда будут реализованы тесты
+# import httpx
+# from fastapi.testclient import TestClient
 
 
 @pytest.mark.integration
