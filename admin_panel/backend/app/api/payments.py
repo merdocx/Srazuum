@@ -95,16 +95,20 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
                 # VIP пользователи не должны платить, но если платеж пришел - активируем
                 logger.warning(f"payment_for_vip_user: link_id={link_id}, user_id={user.id}")
 
-            # Активируем связь и продлеваем подписку
-            # Если subscription_end_date уже установлена, прибавляем к ней
-            # Если нет, устанавливаем новую дату
-            now = datetime.utcnow()
-            if link.subscription_end_date and link.subscription_end_date > now:
-                # Прибавляем к текущей дате окончания
-                new_end_date = link.subscription_end_date + timedelta(days=SUBSCRIPTION_PERIOD_DAYS)
-            else:
-                # Устанавливаем новую дату
-                new_end_date = now + timedelta(days=SUBSCRIPTION_PERIOD_DAYS)
+                # Активируем связь и продлеваем подписку
+                # Если subscription_end_date уже установлена, прибавляем к ней
+                # Если нет, но есть free_trial_end_date (для первой связи), прибавляем к ней
+                # Иначе устанавливаем новую дату от now
+                now = datetime.utcnow()
+                if link.subscription_end_date and link.subscription_end_date > now:
+                    # Прибавляем к текущей дате окончания платной подписки
+                    new_end_date = link.subscription_end_date + timedelta(days=SUBSCRIPTION_PERIOD_DAYS)
+                elif link.free_trial_end_date and link.free_trial_end_date > now:
+                    # Для первой связи: прибавляем к дате окончания бесплатного периода
+                    new_end_date = link.free_trial_end_date + timedelta(days=SUBSCRIPTION_PERIOD_DAYS)
+                else:
+                    # Устанавливаем новую дату от текущего момента
+                    new_end_date = now + timedelta(days=SUBSCRIPTION_PERIOD_DAYS)
 
             link.subscription_end_date = new_end_date
             link.subscription_status = "active"
