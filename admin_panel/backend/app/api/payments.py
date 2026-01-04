@@ -55,7 +55,7 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
         parse_webhook = _get_parse_webhook()
         webhook_data = parse_webhook(body)
         if not webhook_data:
-            logger.error("webhook_parsing_failed", body=body)
+            logger.error(f"webhook_parsing_failed: body={body}")
             return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"error": "Invalid webhook data"})
 
         payment_id = webhook_data["payment_id"]
@@ -158,16 +158,12 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
                         await bot.send_message(chat_id=user.telegram_user_id, text=notification_text)
                         await bot.session.close()
 
-                                logger.info(
-                                    f"payment_notification_sent: link_id={link.id}, user_id={user.id}, telegram_user_id={user.telegram_user_id}"
-                                )
+                        logger.info(
+                            f"payment_notification_sent: link_id={link.id}, user_id={user.id}, telegram_user_id={user.telegram_user_id}"
+                        )
                 except Exception as notify_error:
                     logger.error(
-                        "failed_to_send_payment_notification",
-                        link_id=link.id,
-                        user_id=user.id if user else None,
-                        telegram_user_id=user.telegram_user_id if user else None,
-                        error=str(notify_error),
+                        f"failed_to_send_payment_notification: link_id={link.id}, user_id={user.id if user else None}, telegram_user_id={user.telegram_user_id if user else None}, error={str(notify_error)}",
                         exc_info=True,
                     )
 
@@ -179,7 +175,7 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
                 if link:
                     link.payment_status = "canceled"
                     await db.commit()
-                        logger.info(f"payment_canceled: link_id={link_id}, payment_id={payment_id}")
+                    logger.info(f"payment_canceled: link_id={link_id}, payment_id={payment_id}")
 
         return JSONResponse(status_code=status.HTTP_200_OK, content={"status": "ok"})
 
