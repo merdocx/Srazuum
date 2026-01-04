@@ -240,8 +240,8 @@ async def process_pay_link(user_id: int, link_id: int, message_or_callback) -> b
                 f"Сумма: {payment_info['amount']:.0f} ₽\n"
                 f"Период: {settings.subscription_period_days} дней\n\n"
                 f"Нажмите кнопку ниже для оплаты:\n\n"
-                f"📄 <a href='http://srazuum.ru:8001/docs/privacy_policy.html'>Политика конфиденциальности</a>\n"
-                f"📄 <a href='http://srazuum.ru:8001/docs/terms_of_service.html'>Пользовательское соглашение</a>"
+                f"📄 <a href='https://srazuum.ru/docs/privacy_policy.html'>Политика конфиденциальности</a>\n"
+                f"📄 <a href='https://srazuum.ru/docs/terms_of_service.html'>Пользовательское соглашение</a>"
             )
 
             if hasattr(message_or_callback, "message"):  # CallbackQuery
@@ -383,8 +383,8 @@ async def cmd_pay_link(message: Message, state: FSMContext):
                 f"Сумма: {payment_info['amount']:.0f} ₽\n"
                 f"Период: {settings.subscription_period_days} дней\n\n"
                 f"Нажмите кнопку ниже для оплаты:\n\n"
-                f"📄 <a href='http://srazuum.ru:8001/docs/privacy_policy.html'>Политика конфиденциальности</a>\n"
-                f"📄 <a href='http://srazuum.ru:8001/docs/terms_of_service.html'>Пользовательское соглашение</a>",
+                f"📄 <a href='https://srazuum.ru/docs/privacy_policy.html'>Политика конфиденциальности</a>\n"
+                f"📄 <a href='https://srazuum.ru/docs/terms_of_service.html'>Пользовательское соглашение</a>",
                 reply_markup=payment_keyboard,
                 parse_mode="HTML",
             )
