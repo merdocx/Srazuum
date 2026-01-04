@@ -1110,6 +1110,9 @@ async def message_list_channels_nav(message: Message, state: FSMContext):
 
 async def show_link_detail(message: Message, state: FSMContext, link_id: int):
     """Показать детали связи."""
+    from datetime import datetime, timedelta
+    from app.bot.handlers_payments import format_subscription_info
+
     user = await get_or_create_user(message.from_user.id, message.from_user.username)
 
     async with async_session_maker() as session:
@@ -1148,12 +1151,51 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
         last_success_msg = last_success.scalar_one_or_none()
 
         status_icon = "✅" if link.is_enabled else "❌"
+        
+        # Формируем информацию о подписке
+        status_icons = {
+            "vip": "⭐ VIP",
+            "free_trial": "🆓 Бесплатный период",
+            "active": "✅ Активна",
+            "expired": "⚠️ Истекла",
+            "cancelled": "❌ Отменена",
+        }
+        status_text = status_icons.get(link.subscription_status, link.subscription_status)
+        
+        subscription_text = f"Статус: {status_text}\n"
+        if link.subscription_status == "vip":
+            subscription_text += "Тип: Бесплатная подписка (VIP)\n"
+        elif link.is_first_link:
+            subscription_text += "Тип: Первая связь (бесплатно)\n"
+        else:
+            subscription_text += "Тип: Платная подписка\n"
+        
+        # Определяем дату окончания
+        end_date = link.subscription_end_date or link.free_trial_end_date
+        if end_date:
+            now = datetime.utcnow()
+            if end_date > now:
+                delta = end_date - now
+                days = delta.days
+                hours = delta.seconds // 3600
+                if days > 0:
+                    subscription_text += f"Осталось: {days} дней\n"
+                else:
+                    subscription_text += f"Осталось: {hours} часов\n"
+                subscription_text += f"Окончание: {end_date.strftime('%d.%m.%Y %H:%M')}\n"
+            else:
+                delta = now - end_date
+                days = delta.days
+                subscription_text += f"Истекла {days} дней назад\n"
+                subscription_text += f"Окончание: {end_date.strftime('%d.%m.%Y %H:%M')}\n"
+        
         text = (
-            f"{status_icon} Связь {link.telegram_channel.channel_title} - {link.max_channel.channel_title}\n\n"
+            f"{status_icon} Связь #{link.id}\n\n"
             f"Telegram: {link.telegram_channel.channel_title}\n"
             f"MAX: {link.max_channel.channel_title}\n"
             f"Статус: {'Активна' if link.is_enabled else 'Неактивна'}\n"
             f"Создана: {link.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
+            f"📅 Подписка:\n{subscription_text}\n"
             f"📊 Статистика:\n"
             f"Успешных: {success_count.scalar() or 0}\n"
             f"Неудачных: {failed_count.scalar() or 0}"
@@ -1162,10 +1204,29 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
         if last_success_msg:
             text += f"\n\nПоследняя отправка: {last_success_msg.sent_at.strftime('%Y-%m-%d %H:%M:%S')}"
 
-        keyboard = get_link_detail_keyboard(link_id, link.is_enabled)
+        # Создаем комбинированную клавиатуру: ReplyKeyboardMarkup + InlineKeyboardMarkup
+        reply_keyboard = get_link_detail_keyboard(link_id, link.is_enabled)
+        
+        # Добавляем инлайн-кнопки для продления/оплаты подписки
+        inline_buttons = []
+        if link.subscription_status in ("active", "free_trial") and not user.is_vip:
+            inline_buttons.append([InlineKeyboardButton(text="🔄 Продлить подписку", callback_data=f"renew_link_{link.id}")])
+        elif link.subscription_status == "expired" and not user.is_vip:
+            inline_buttons.append([InlineKeyboardButton(text="💳 Оплатить подписку", callback_data=f"pay_link_{link.id}")])
+        
+        inline_keyboard = InlineKeyboardMarkup(inline_keyboard=inline_buttons) if inline_buttons else None
+
         await state.set_state(LinkManagementStates.viewing_link_detail)
         await state.update_data(current_link_id=link_id)
-        await message.answer(text, reply_markup=keyboard)
+        
+        # Отправляем сообщение с инлайн-кнопками, если есть
+        if inline_keyboard:
+            await message.answer(text, reply_markup=inline_keyboard)
+            # Отправляем reply-клавиатуру отдельным сообщением
+            await message.answer("Действия:", reply_markup=reply_keyboard)
+        else:
+            await message.answer(text, reply_markup=reply_keyboard)
+        
         logger.info("link_detail_shown", link_id=link_id, user_id=user.id)
 
 
