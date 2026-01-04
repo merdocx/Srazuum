@@ -21,6 +21,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount static files for legal documents (before routers to avoid conflicts)
+app.mount("/docs", StaticFiles(directory="/var/www/docs", html=True), name="docs")
+
 # Подключаем роутеры
 app.include_router(api_router, prefix="/api")
 
