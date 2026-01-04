@@ -14,7 +14,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="✅ Добавить связь"), KeyboardButton(text="📋 Список связей")],
-            [KeyboardButton(text="❓ Помощь")],
+            [KeyboardButton(text="💬 Связаться с поддержкой")],
         ],
         resize_keyboard=True,
     )
