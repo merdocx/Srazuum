@@ -60,9 +60,14 @@ async def get_links(
             subscription_type = "Бесплатная"
             if link.subscription_status == "vip":
                 subscription_type = "VIP (бесплатно)"
-            elif link.is_first_link:
+            elif link.is_first_link and not link.payment_status:
+                # Первая связь без оплаты
                 subscription_type = "Первая связь (бесплатно)"
-            elif link.subscription_status in ("active", "free_trial"):
+            elif link.subscription_status in ("active", "free_trial") or link.payment_status == "succeeded":
+                # Платная подписка (активная или была оплата)
+                subscription_type = "Платная"
+            elif link.is_first_link:
+                # Первая связь, но была оплата
                 subscription_type = "Платная"
             
             links_data.append(

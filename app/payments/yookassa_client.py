@@ -115,7 +115,7 @@ def parse_webhook(request_body: dict) -> Optional[Dict[str, Any]]:
         notification = WebhookNotificationFactory().create(request_body)
         payment_object = notification.object
 
-        logger.info("webhook_received", event=notification.event, payment_id=payment_object.id, status=payment_object.status)
+        logger.info(f"webhook_received: event={notification.event}, payment_id={payment_object.id}, status={payment_object.status}")
 
         return {
             "event": notification.event,
@@ -126,5 +126,5 @@ def parse_webhook(request_body: dict) -> Optional[Dict[str, Any]]:
             "metadata": payment_object.metadata or {},
         }
     except Exception as e:
-        logger.error("webhook_parsing_failed", error=str(e), request_body=request_body)
+        logger.error(f"webhook_parsing_failed: {str(e)}, request_body={request_body}")
         return None
