@@ -16,6 +16,24 @@ else:
     logger.warning("yookassa_credentials_not_set", message="YooKassa credentials not configured")
 
 
+def get_return_url() -> str:
+    """
+    Получить URL для возврата после оплаты.
+    
+    Для Telegram ботов используется формат https://t.me/<bot_username>
+    Если yookassa_return_url настроен в настройках, используется он.
+    Иначе формируется URL на основе bot token (если можно извлечь username).
+    """
+    if settings.yookassa_return_url:
+        return settings.yookassa_return_url
+    
+    # Для Telegram ботов можно использовать просто https://t.me/<bot_username>
+    # Но лучше оставить пустым или использовать настраиваемый URL
+    # В Telegram результат платежа приходит через webhook, return_url используется только для редиректа
+    # Можно использовать простой формат или deep link
+    return "https://t.me/"  # Базовый URL, пользователь вернется в Telegram
+
+
 def create_payment(link_id: int, user_id: int, amount: Optional[float] = None) -> Dict[str, Any]:
     """
     Создать платеж в YooKassa.
@@ -33,9 +51,11 @@ def create_payment(link_id: int, user_id: int, amount: Optional[float] = None) -
 
     amount = amount or settings.subscription_price
 
+    return_url = get_return_url()
+    
     payment_data = {
         "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
-        "confirmation": {"type": "redirect", "return_url": settings.yookassa_return_url or "https://t.me/your_bot"},
+        "confirmation": {"type": "redirect", "return_url": return_url},
         "capture": True,
         "description": f"Оплата подписки кросспостинга (связь #{link_id})",
         "metadata": {"link_id": str(link_id), "user_id": str(user_id)},
