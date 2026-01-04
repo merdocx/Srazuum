@@ -84,6 +84,11 @@ export interface Link {
   telegram_channel_id: number
   max_channel_id: number
   is_enabled: boolean
+  subscription_status?: string
+  subscription_type?: string
+  subscription_end_date?: string
+  free_trial_end_date?: string
+  is_first_link?: boolean
   created_at: string
   updated_at: string
 }

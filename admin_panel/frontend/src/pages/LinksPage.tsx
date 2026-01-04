@@ -59,24 +59,41 @@ export default function LinksPage() {
               <th>Telegram канал</th>
               <th>MAX канал</th>
               <th>Активна</th>
+              <th>Тип подписки</th>
+              <th>Окончание</th>
               <th>Создана</th>
             </tr>
           </thead>
           <tbody>
-            {data?.data.map((link) => (
-              <tr key={link.id}>
-                <td>{link.id}</td>
-                <td>{link.user_id}</td>
-                <td>
-                  {link.telegram_channel?.title || link.telegram_channel?.username || '-'}
-                </td>
-                <td>
-                  {link.max_channel?.title || link.max_channel?.username || '-'}
-                </td>
-                <td>{link.is_enabled ? '✓' : '✗'}</td>
-                <td>{new Date(link.created_at).toLocaleString('ru-RU')}</td>
-              </tr>
-            ))}
+            {data?.data.map((link) => {
+              const endDate = link.subscription_end_date || link.free_trial_end_date
+              const formattedEndDate = endDate 
+                ? new Date(endDate).toLocaleDateString('ru-RU', { 
+                    day: '2-digit', 
+                    month: '2-digit', 
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                  })
+                : '-'
+              
+              return (
+                <tr key={link.id}>
+                  <td>{link.id}</td>
+                  <td>{link.user_id}</td>
+                  <td>
+                    {link.telegram_channel?.title || link.telegram_channel?.username || '-'}
+                  </td>
+                  <td>
+                    {link.max_channel?.title || link.max_channel?.username || '-'}
+                  </td>
+                  <td>{link.is_enabled ? '✓' : '✗'}</td>
+                  <td>{link.subscription_type || '-'}</td>
+                  <td>{formattedEndDate}</td>
+                  <td>{new Date(link.created_at).toLocaleString('ru-RU')}</td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>

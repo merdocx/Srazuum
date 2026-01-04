@@ -56,6 +56,15 @@ async def get_links(
             max_channel_result = await db.execute(select(MaxChannel).where(MaxChannel.id == link.max_channel_id))
             max_channel = max_channel_result.scalar_one_or_none()
 
+            # Определяем тип подписки
+            subscription_type = "Бесплатная"
+            if link.subscription_status == "vip":
+                subscription_type = "VIP (бесплатно)"
+            elif link.is_first_link:
+                subscription_type = "Первая связь (бесплатно)"
+            elif link.subscription_status in ("active", "free_trial"):
+                subscription_type = "Платная"
+            
             links_data.append(
                 {
                     "id": link.id,
@@ -79,6 +88,11 @@ async def get_links(
                         else None
                     ),
                     "is_enabled": link.is_enabled,
+                    "subscription_status": link.subscription_status,
+                    "subscription_type": subscription_type,
+                    "subscription_end_date": link.subscription_end_date,
+                    "free_trial_end_date": link.free_trial_end_date,
+                    "is_first_link": link.is_first_link,
                     "created_at": link.created_at,
                     "updated_at": link.updated_at,
                 }
