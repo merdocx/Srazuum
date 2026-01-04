@@ -245,10 +245,10 @@ async def process_pay_link(user_id: int, link_id: int, message_or_callback) -> b
             )
 
             if hasattr(message_or_callback, "message"):  # CallbackQuery
-                await message_or_callback.message.answer(answer_text, reply_markup=payment_keyboard)
+                await message_or_callback.message.answer(answer_text, reply_markup=payment_keyboard, parse_mode="HTML")
                 await message_or_callback.answer()
             else:  # Message
-                await message_or_callback.answer(answer_text, reply_markup=payment_keyboard)
+                await message_or_callback.answer(answer_text, reply_markup=payment_keyboard, parse_mode="HTML")
 
             return True
         except Exception as e:
@@ -382,8 +382,11 @@ async def cmd_pay_link(message: Message, state: FSMContext):
                 f"{period_info}\n\n"
                 f"Сумма: {payment_info['amount']:.0f} ₽\n"
                 f"Период: {settings.subscription_period_days} дней\n\n"
-                f"Нажмите кнопку ниже для оплаты:",
+                f"Нажмите кнопку ниже для оплаты:\n\n"
+                f"📄 <a href='https://telegra.ph/Politika-konfidencialnosti-Srazuum-01-04'>Политика конфиденциальности</a>\n"
+                f"📄 <a href='https://telegra.ph/Polzovatelskoe-soglashenie-Srazuum-01-04'>Пользовательское соглашение</a>",
                 reply_markup=payment_keyboard,
+                parse_mode="HTML",
             )
         except Exception as e:
             logger.error("payment_creation_error", error=str(e), link_id=link.id, user_id=user.id)
