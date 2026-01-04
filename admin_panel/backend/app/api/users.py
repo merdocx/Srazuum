@@ -4,13 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from typing import Optional
-import sys
-from pathlib import Path
 
-# Добавляем путь к основному приложению для импорта logger
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent.parent))
 from app.utils.logger import get_logger
-
 from app.core.database import get_db
 from app.api.auth import get_current_admin
 from app.models.admin import Admin

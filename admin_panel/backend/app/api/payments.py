@@ -6,18 +6,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from datetime import datetime, timedelta
 import json
+import sys
+from pathlib import Path
 
+from app.utils.logger import get_logger
 from app.core.database import get_db
 from app.models.shared import CrosspostingLink, User
-from app.payments.yookassa_client import parse_webhook
-from app.utils.logger import get_logger
-from config.settings import settings as app_settings
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 logger = get_logger(__name__)
 
 # Период подписки по умолчанию (в днях)
 SUBSCRIPTION_PERIOD_DAYS = 30
+
+# Путь к основному приложению
+_project_root = Path(__file__).parent.parent.parent.parent.parent
+
+
+def _get_parse_webhook():
+    """Ленивый импорт parse_webhook из основного приложения."""
+    # Добавляем путь к основному приложению
+    if str(_project_root) not in sys.path:
+        sys.path.insert(0, str(_project_root))
+    
+    # Импортируем parse_webhook
+    from app.payments.yookassa_client import parse_webhook
+    return parse_webhook
 
 
 @router.post("/webhook")
@@ -31,7 +45,8 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
         # Получаем тело запроса
         body = await request.json()
 
-        # Парсим webhook
+        # Парсим webhook (ленивый импорт)
+        parse_webhook = _get_parse_webhook()
         webhook_data = parse_webhook(body)
         if not webhook_data:
             logger.error("webhook_parsing_failed", body=body)
