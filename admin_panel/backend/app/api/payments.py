@@ -25,14 +25,19 @@ _project_root = Path(__file__).parent.parent.parent.parent.parent
 
 def _get_parse_webhook():
     """Ленивый импорт parse_webhook из основного приложения."""
+    import importlib.util
+    
     # Добавляем путь к основному приложению
     if str(_project_root) not in sys.path:
         sys.path.insert(0, str(_project_root))
 
-    # Импортируем parse_webhook
-    from app.payments.yookassa_client import parse_webhook
-
-    return parse_webhook
+    # Используем importlib для динамического импорта
+    yookassa_client_path = _project_root / "app" / "payments" / "yookassa_client.py"
+    spec = importlib.util.spec_from_file_location("yookassa_client", yookassa_client_path)
+    yookassa_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(yookassa_module)
+    
+    return yookassa_module.parse_webhook
 
 
 @router.post("/webhook")
