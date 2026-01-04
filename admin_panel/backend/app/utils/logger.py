@@ -1,4 +1,5 @@
 """Настройка логирования для админ-панели."""
+
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ try:
     def get_logger(name: str = __name__):
         """Получить логгер из основного приложения."""
         return _get_logger_main(name)
+
 except ImportError:
     # Fallback на стандартный logging, если основной модуль недоступен
     import logging
@@ -25,4 +27,3 @@ except ImportError:
     def get_logger(name: str = __name__):
         """Получить стандартный логгер."""
         return logging.getLogger(name)
-

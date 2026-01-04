@@ -1,6 +1,7 @@
 """Тесты для API health checks."""
 
 import pytest
+
 # TODO: Раскомментировать когда будут реализованы тесты
 # import httpx
 # from fastapi.testclient import TestClient

@@ -28,9 +28,10 @@ def _get_parse_webhook():
     # Добавляем путь к основному приложению
     if str(_project_root) not in sys.path:
         sys.path.insert(0, str(_project_root))
-    
+
     # Импортируем parse_webhook
     from app.payments.yookassa_client import parse_webhook
+
     return parse_webhook
 
 
