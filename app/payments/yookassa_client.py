@@ -19,14 +19,14 @@ else:
 def get_return_url() -> str:
     """
     Получить URL для возврата после оплаты.
-    
+
     Для Telegram ботов используется формат https://t.me/<bot_username>
     Если yookassa_return_url настроен в настройках, используется он.
     Иначе формируется URL на основе bot token (если можно извлечь username).
     """
     if settings.yookassa_return_url:
         return settings.yookassa_return_url
-    
+
     # Для Telegram ботов можно использовать просто https://t.me/<bot_username>
     # Но лучше оставить пустым или использовать настраиваемый URL
     # В Telegram результат платежа приходит через webhook, return_url используется только для редиректа
@@ -52,7 +52,7 @@ def create_payment(link_id: int, user_id: int, amount: Optional[float] = None) -
     amount = amount or settings.subscription_price
 
     return_url = get_return_url()
-    
+
     payment_data = {
         "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
         "confirmation": {"type": "redirect", "return_url": return_url},
@@ -115,7 +115,9 @@ def parse_webhook(request_body: dict) -> Optional[Dict[str, Any]]:
         notification = WebhookNotificationFactory().create(request_body)
         payment_object = notification.object
 
-        logger.info(f"webhook_received: event={notification.event}, payment_id={payment_object.id}, status={payment_object.status}")
+        logger.info(
+            f"webhook_received: event={notification.event}, payment_id={payment_object.id}, status={payment_object.status}"
+        )
 
         return {
             "event": notification.event,

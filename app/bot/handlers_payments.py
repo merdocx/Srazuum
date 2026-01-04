@@ -153,12 +153,12 @@ async def cmd_my_subscriptions(message: Message, state: FSMContext):
 async def process_pay_link(user_id: int, link_id: int, message_or_callback) -> bool:
     """
     Общая функция для обработки оплаты/продления связи.
-    
+
     Args:
         user_id: ID пользователя Telegram
         link_id: ID связи
         message_or_callback: Message или CallbackQuery объект
-    
+
     Returns:
         True если успешно, False если ошибка
     """
@@ -168,13 +168,13 @@ async def process_pay_link(user_id: int, link_id: int, message_or_callback) -> b
         user = result.scalar_one_or_none()
 
         if not user:
-            if hasattr(message_or_callback, 'answer'):
+            if hasattr(message_or_callback, "answer"):
                 await message_or_callback.answer("❌ Пользователь не найден. Используйте /start для регистрации.")
             return False
 
         # Проверяем VIP статус
         if user.is_vip:
-            if hasattr(message_or_callback, 'answer'):
+            if hasattr(message_or_callback, "answer"):
                 await message_or_callback.answer(
                     "⭐ Вы VIP пользователь!\n\n" "Все ваши связи активны бесплатно. Оплата не требуется.",
                     reply_markup=get_main_keyboard(),
@@ -188,7 +188,7 @@ async def process_pay_link(user_id: int, link_id: int, message_or_callback) -> b
         link = result.scalar_one_or_none()
 
         if not link:
-            if hasattr(message_or_callback, 'answer'):
+            if hasattr(message_or_callback, "answer"):
                 await message_or_callback.answer(
                     f"❌ Связь #{link_id} не найдена.\n\n"
                     "Убедитесь, что вы указали правильный ID связи.\n"
@@ -242,16 +242,16 @@ async def process_pay_link(user_id: int, link_id: int, message_or_callback) -> b
                 f"Нажмите кнопку ниже для оплаты:"
             )
 
-            if hasattr(message_or_callback, 'message'):  # CallbackQuery
+            if hasattr(message_or_callback, "message"):  # CallbackQuery
                 await message_or_callback.message.answer(answer_text, reply_markup=payment_keyboard)
                 await message_or_callback.answer()
             else:  # Message
                 await message_or_callback.answer(answer_text, reply_markup=payment_keyboard)
-            
+
             return True
         except Exception as e:
             logger.error("payment_creation_error", error=str(e), link_id=link.id, user_id=user.id)
-            if hasattr(message_or_callback, 'answer'):
+            if hasattr(message_or_callback, "answer"):
                 await message_or_callback.answer(
                     f"❌ Ошибка при создании платежа: {str(e)}\n\n" "Попробуйте позже или обратитесь в поддержку."
                 )
@@ -262,11 +262,12 @@ async def process_pay_link(user_id: int, link_id: int, message_or_callback) -> b
 async def callback_pay_link(callback: CallbackQuery, state: FSMContext):
     """Обработчик callback-кнопки оплаты подписки."""
     import re
+
     match = re.search(r"pay_link_(\d+)", callback.data)
     if not match:
         await callback.answer("Ошибка: не удалось определить ID связи.", show_alert=True)
         return
-    
+
     link_id = int(match.group(1))
     await process_pay_link(callback.from_user.id, link_id, callback)
 
@@ -275,11 +276,12 @@ async def callback_pay_link(callback: CallbackQuery, state: FSMContext):
 async def callback_renew_link(callback: CallbackQuery, state: FSMContext):
     """Обработчик callback-кнопки продления подписки (то же, что и оплата)."""
     import re
+
     match = re.search(r"renew_link_(\d+)", callback.data)
     if not match:
         await callback.answer("Ошибка: не удалось определить ID связи.", show_alert=True)
         return
-    
+
     link_id = int(match.group(1))
     await process_pay_link(callback.from_user.id, link_id, callback)
 

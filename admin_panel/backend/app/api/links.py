@@ -48,7 +48,7 @@ async def get_links(
             count_query = count_query.where(CrosspostingLink.telegram_channel_id == telegram_channel_id)
         if max_channel_id:
             count_query = count_query.where(CrosspostingLink.max_channel_id == max_channel_id)
-        
+
         count_result = await db.execute(count_query)
         total = count_result.scalar() or 0
 
@@ -80,7 +80,7 @@ async def get_links(
             elif link.is_first_link:
                 # Первая связь, но была оплата
                 subscription_type = "Платная"
-            
+
             links_data.append(
                 {
                     "id": link.id,

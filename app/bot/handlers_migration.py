@@ -115,7 +115,7 @@ async def message_migrate_link(message: Message, state: FSMContext):
 
         # Запускаем миграцию в фоне
         await state.set_state(MigrateStates.migrating)
-        
+
         # Отправляем уведомление о начале и сохраняем message_id
         start_text = (
             f"⚠️ Начинается перенос старых постов\n\n"
@@ -127,7 +127,7 @@ async def message_migrate_link(message: Message, state: FSMContext):
             f"⏳ Начинаю перенос, вы получите уведомление по окончании переноса"
         )
         start_message = await message.answer(start_text, reply_markup=get_stop_migration_keyboard())
-        
+
         await state.update_data(migrate_link_id=link_id, migration_start_message_id=start_message.message_id)
 
         # Запускаем миграцию в фоне
@@ -347,7 +347,7 @@ async def start_migration(link_id: int, user_id: int, chat_id: int, start_messag
                 except Exception as edit_error:
                     # Если не удалось отредактировать (например, сообщение было удалено), игнорируем ошибку
                     logger.debug("failed_to_edit_start_message_keyboard", error=str(edit_error))
-            
+
             await bot.send_message(chat_id, final_text, reply_markup=get_main_keyboard())
             logger.info("migration_completed_notification_sent", link_id=link_id, result=result)
         except Exception as send_error:
@@ -374,7 +374,7 @@ async def start_migration(link_id: int, user_id: int, chat_id: int, start_messag
                         await bot.edit_message_reply_markup(chat_id=chat_id, message_id=start_message_id, reply_markup=None)
                     except Exception:
                         pass  # Игнорируем ошибку редактирования
-                
+
                 await bot.send_message(chat_id, error_text, reply_markup=get_main_keyboard())
             except Exception as send_error:
                 logger.error("failed_to_send_error_message", error=str(send_error))

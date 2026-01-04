@@ -1151,7 +1151,7 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
         last_success_msg = last_success.scalar_one_or_none()
 
         status_icon = "✅" if link.is_enabled else "❌"
-        
+
         # Формируем информацию о подписке
         status_icons = {
             "vip": "⭐ VIP",
@@ -1161,7 +1161,7 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
             "cancelled": "❌ Отменена",
         }
         status_text = status_icons.get(link.subscription_status, link.subscription_status)
-        
+
         subscription_text = f"Статус: {status_text}\n"
         if link.subscription_status == "vip":
             subscription_text += "Тип: Бесплатная подписка (VIP)\n"
@@ -1169,7 +1169,7 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
             subscription_text += "Тип: Первая связь (бесплатно)\n"
         else:
             subscription_text += "Тип: Платная подписка\n"
-        
+
         # Определяем дату окончания
         end_date = link.subscription_end_date or link.free_trial_end_date
         if end_date:
@@ -1188,7 +1188,7 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
                 days = delta.days
                 subscription_text += f"Истекла {days} дней назад\n"
                 subscription_text += f"Окончание: {end_date.strftime('%d.%m.%Y %H:%M')}\n"
-        
+
         text = (
             f"{status_icon} Связь #{link.id}\n\n"
             f"Telegram: {link.telegram_channel.channel_title}\n"
@@ -1206,19 +1206,19 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
 
         # Создаем комбинированную клавиатуру: ReplyKeyboardMarkup + InlineKeyboardMarkup
         reply_keyboard = get_link_detail_keyboard(link_id, link.is_enabled)
-        
+
         # Добавляем инлайн-кнопки для продления/оплаты подписки
         inline_buttons = []
         if link.subscription_status in ("active", "free_trial") and not user.is_vip:
             inline_buttons.append([InlineKeyboardButton(text="🔄 Продлить подписку", callback_data=f"renew_link_{link.id}")])
         elif link.subscription_status == "expired" and not user.is_vip:
             inline_buttons.append([InlineKeyboardButton(text="💳 Оплатить подписку", callback_data=f"pay_link_{link.id}")])
-        
+
         inline_keyboard = InlineKeyboardMarkup(inline_keyboard=inline_buttons) if inline_buttons else None
 
         await state.set_state(LinkManagementStates.viewing_link_detail)
         await state.update_data(current_link_id=link_id)
-        
+
         # Отправляем сообщение с инлайн-кнопками, если есть
         if inline_keyboard:
             await message.answer(text, reply_markup=inline_keyboard)
@@ -1226,7 +1226,7 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
             await message.answer("Действия:", reply_markup=reply_keyboard)
         else:
             await message.answer(text, reply_markup=reply_keyboard)
-        
+
         logger.info("link_detail_shown", link_id=link_id, user_id=user.id)
 
 

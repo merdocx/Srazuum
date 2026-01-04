@@ -26,7 +26,7 @@ _project_root = Path(__file__).parent.parent.parent.parent.parent
 def _get_parse_webhook():
     """Ленивый импорт parse_webhook из основного приложения."""
     import importlib.util
-    
+
     # Добавляем путь к основному приложению
     if str(_project_root) not in sys.path:
         sys.path.insert(0, str(_project_root))
@@ -36,7 +36,7 @@ def _get_parse_webhook():
     spec = importlib.util.spec_from_file_location("yookassa_client", yookassa_client_path)
     yookassa_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(yookassa_module)
-    
+
     return yookassa_module.parse_webhook
 
 
@@ -128,25 +128,28 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
                     # Добавляем путь к основному приложению для импорта settings
                     if str(_project_root) not in sys.path:
                         sys.path.insert(0, str(_project_root))
-                    
+
                     from aiogram import Bot
                     from config.settings import settings as app_settings
-                    
+
                     if not app_settings.telegram_bot_token:
                         logger.error("telegram_bot_token_not_configured", link_id=link.id, user_id=user.id)
                     else:
                         bot = Bot(token=app_settings.telegram_bot_token)
-                        
+
                         # Загружаем информацию о каналах для сообщения
                         from app.models.shared import TelegramChannel, MaxChannel
-                        tg_result = await db.execute(select(TelegramChannel).where(TelegramChannel.id == link.telegram_channel_id))
+
+                        tg_result = await db.execute(
+                            select(TelegramChannel).where(TelegramChannel.id == link.telegram_channel_id)
+                        )
                         tg_ch = tg_result.scalar_one_or_none()
                         max_result = await db.execute(select(MaxChannel).where(MaxChannel.id == link.max_channel_id))
                         max_ch = max_result.scalar_one_or_none()
-                        
+
                         tg_name = tg_ch.channel_username or tg_ch.channel_title if tg_ch else "N/A"
                         max_name = max_ch.channel_username or max_ch.channel_title if max_ch else "N/A"
-                        
+
                         notification_text = (
                             f"✅ Платеж успешно обработан!\n\n"
                             f"📊 Связь #{link.id}\n"
@@ -155,10 +158,10 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
                             f"📅 Подписка продлена до: {new_end_date.strftime('%d.%m.%Y %H:%M')}\n\n"
                             f"Кросспостинг активирован."
                         )
-                        
+
                         await bot.send_message(chat_id=user.telegram_user_id, text=notification_text)
                         await bot.session.close()
-                        
+
                         logger.info(
                             "payment_notification_sent",
                             link_id=link.id,
