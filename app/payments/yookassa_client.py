@@ -64,7 +64,7 @@ def create_payment(link_id: int, user_id: int, amount: Optional[float] = None) -
     try:
         payment = Payment.create(payment_data)
 
-        logger.info("payment_created", payment_id=payment.id, link_id=link_id, user_id=user_id, amount=amount)
+        logger.info(f"payment_created: payment_id={payment.id}, link_id={link_id}, user_id={user_id}, amount={amount}")
 
         return {
             "payment_id": payment.id,
@@ -73,7 +73,7 @@ def create_payment(link_id: int, user_id: int, amount: Optional[float] = None) -
             "amount": amount,
         }
     except Exception as e:
-        logger.error("payment_creation_failed", error=str(e), link_id=link_id, user_id=user_id)
+        logger.error(f"payment_creation_failed: error={str(e)}, link_id={link_id}, user_id={user_id}")
         raise
 
 
@@ -97,7 +97,7 @@ def get_payment_status(payment_id: str) -> Optional[Dict[str, Any]]:
             "metadata": payment.metadata or {},
         }
     except Exception as e:
-        logger.error("payment_status_check_failed", payment_id=payment_id, error=str(e))
+        logger.error(f"payment_status_check_failed: payment_id={payment_id}, error={str(e)}")
         return None
 
 
