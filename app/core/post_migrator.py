@@ -60,6 +60,7 @@ class PostMigrator:
             "skipped": 0,
             "skipped_empty": 0,  # Пустые сообщения
             "skipped_duplicate": 0,  # Дубликаты
+            "skipped_unsupported": 0,  # Неподдерживаемые типы (например, стикеры)
             "failed": 0,
         }
 
@@ -306,6 +307,20 @@ class PostMigrator:
                         msg = item["message"]
                         processed_count += 1
 
+                        # Проверяем на неподдерживаемые типы (стикеры)
+                        # Стикеры не поддерживаются MAX API, пропускаем их
+                        if msg.sticker:
+                            stats["skipped"] += 1
+                            stats["skipped_unsupported"] += 1
+                            logger.info(
+                                "post_skipped_unsupported_sticker",
+                                message_id=msg.id,
+                                link_id=link_id,
+                                processed=processed_count,
+                                total=len(items_to_process_sorted),
+                            )
+                            continue
+
                     # Пропускаем пустые сообщения (без текста, caption и медиа)
                     # ВАЖНО: Добавляем msg.animation для поддержки GIF
                     has_content = bool(
@@ -514,6 +529,7 @@ class PostMigrator:
                 skipped_posts=stats["skipped"],
                 skipped_empty=stats["skipped_empty"],
                 skipped_duplicate=stats["skipped_duplicate"],
+                skipped_unsupported=stats["skipped_unsupported"],
                 failed_posts=stats["failed"],
                 processed=processed_count,
             )

@@ -317,12 +317,15 @@ async def start_migration(link_id: int, user_id: int, chat_id: int, start_messag
         skipped = result.get("skipped", 0)
         skipped_empty = result.get("skipped_empty", 0)
         skipped_duplicate = result.get("skipped_duplicate", 0)
+        skipped_unsupported = result.get("skipped_unsupported", 0)
 
         skipped_lines = []
         if skipped_empty > 0:
             skipped_lines.append(f"• Пропущено (пустые): {skipped_empty}")
         if skipped_duplicate > 0:
             skipped_lines.append(f"• Пропущено (уже были): {skipped_duplicate}")
+        if skipped_unsupported > 0:
+            skipped_lines.append(f"• Пропущено (неподдерживаемые): {skipped_unsupported}")
 
         skipped_text = "\n".join(skipped_lines) if skipped_lines else ""
 
