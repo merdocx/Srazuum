@@ -64,7 +64,9 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
         link_id = metadata.get("link_id")
         user_id = metadata.get("user_id")
 
-        logger.info(f"webhook_processed: payment_id={payment_id}, status={payment_status}, link_id={link_id}, user_id={user_id}")
+        logger.info(
+            f"webhook_processed: payment_id={payment_id}, status={payment_status}, link_id={link_id}, user_id={user_id}"
+        )
 
         # Обрабатываем только успешные платежи
         if payment_status == "succeeded":
