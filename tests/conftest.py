@@ -3,10 +3,11 @@
 import pytest
 import asyncio
 import sys
+import os
 from pathlib import Path
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool
 
 # Добавляем корень проекта в путь
 project_root = Path(__file__).parent.parent
@@ -19,13 +20,18 @@ from config.database import Base
 from app.models import User, TelegramChannel, MaxChannel, CrosspostingLink
 
 
-# Тестовая база данных (in-memory SQLite)
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+# Тестовая база данных (PostgreSQL)
+# Используем переменную окружения TEST_DATABASE_URL, если она установлена
+# Иначе используем значение по умолчанию для локальной разработки
+TEST_DATABASE_URL = os.getenv(
+    "TEST_DATABASE_URL",
+    "postgresql+asyncpg://postgres:postgres@localhost:5432/crossposting_test",
+)
 
 test_engine = create_async_engine(
     TEST_DATABASE_URL,
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
+    poolclass=NullPool,  # Не используем пул соединений для тестов
+    echo=False,
 )
 
 TestSessionLocal = async_sessionmaker(
@@ -40,13 +46,16 @@ TestSessionLocal = async_sessionmaker(
 @pytest.fixture(scope="function")
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
     """Фикстура для тестовой сессии БД."""
+    # Создаем все таблицы перед тестом
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+    # Выполняем тест
     async with TestSessionLocal() as session:
         yield session
         await session.rollback()
 
+    # Удаляем все таблицы после теста
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
 
