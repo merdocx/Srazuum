@@ -14,6 +14,7 @@ class User(Base):
     id = Column(BigInteger, primary_key=True, index=True)
     telegram_user_id = Column(BigInteger, unique=True, nullable=False, index=True)
     telegram_username = Column(String, nullable=True)
+    is_vip = Column(Boolean, default=False, nullable=False, index=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
