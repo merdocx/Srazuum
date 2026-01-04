@@ -25,6 +25,18 @@ export default function UsersPage() {
     }
   )
 
+  const updateVIPMutation = useMutation(
+    async ({ userId, isVip }: { userId: number; isVip: boolean }) => {
+      const response = await api.patch(`/api/users/${userId}/vip`, { is_vip: isVip })
+      return response.data
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries(['users'])
+      },
+    }
+  )
+
   if (isLoading) {
     return <div className="page-loading">Загрузка пользователей...</div>
   }
@@ -60,6 +72,7 @@ export default function UsersPage() {
               <th>ID</th>
               <th>Telegram ID</th>
               <th>Username</th>
+              <th>VIP</th>
               <th>Каналы</th>
               <th>Связи</th>
               <th>Дата создания</th>
