@@ -64,7 +64,7 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
         link_id = metadata.get("link_id")
         user_id = metadata.get("user_id")
 
-                logger.info(f"webhook_processed: payment_id={payment_id}, status={payment_status}, link_id={link_id}, user_id={user_id}")
+        logger.info(f"webhook_processed: payment_id={payment_id}, status={payment_status}, link_id={link_id}, user_id={user_id}")
 
         # Обрабатываем только успешные платежи
         if payment_status == "succeeded":
@@ -77,12 +77,12 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
             link = result.scalar_one_or_none()
 
             if not link:
-                    logger.error(f"link_not_found: link_id={link_id}, payment_id={payment_id}")
+                logger.error(f"link_not_found: link_id={link_id}, payment_id={payment_id}")
                 return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"error": "Link not found"})
 
             # Проверяем, что платеж еще не обработан
             if link.payment_status == "succeeded":
-                    logger.warning(f"payment_already_processed: link_id={link_id}, payment_id={payment_id}")
+                logger.warning(f"payment_already_processed: link_id={link_id}, payment_id={payment_id}")
                 return JSONResponse(status_code=status.HTTP_200_OK, content={"status": "already_processed"})
 
             # Загружаем пользователя для проверки VIP статуса
@@ -91,7 +91,7 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
 
             if user and user.is_vip:
                 # VIP пользователи не должны платить, но если платеж пришел - активируем
-                    logger.warning(f"payment_for_vip_user: link_id={link_id}, user_id={user.id}")
+                logger.warning(f"payment_for_vip_user: link_id={link_id}, user_id={user.id}")
 
             # Активируем связь и продлеваем подписку
             # Если subscription_end_date уже установлена, прибавляем к ней
@@ -113,9 +113,9 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
 
             await db.commit()
 
-                    logger.info(
-                        f"subscription_activated: link_id={link.id}, user_id={user.id if user else None}, payment_id={payment_id}, end_date={new_end_date}"
-                    )
+            logger.info(
+                f"subscription_activated: link_id={link.id}, user_id={user.id if user else None}, payment_id={payment_id}, end_date={new_end_date}"
+            )
 
             # Отправляем уведомление пользователю через бота об успешной оплате
             if user:
@@ -129,7 +129,7 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
                     from config.settings import settings as app_settings
 
                     if not app_settings.telegram_bot_token:
-                            logger.error(f"telegram_bot_token_not_configured: link_id={link.id}, user_id={user.id}")
+                        logger.error(f"telegram_bot_token_not_configured: link_id={link.id}, user_id={user.id}")
                     else:
                         bot = Bot(token=app_settings.telegram_bot_token)
 
