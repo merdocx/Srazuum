@@ -38,7 +38,18 @@ async def get_links(
             query = query.where(CrosspostingLink.max_channel_id == max_channel_id)
 
         # Общее количество
-        count_result = await db.execute(select(func.count(CrosspostingLink.id)).select_from(query.subquery()))
+        # Используем прямой запрос count вместо subquery для избежания проблем
+        count_query = select(func.count(CrosspostingLink.id))
+        if user_id:
+            count_query = count_query.where(CrosspostingLink.user_id == user_id)
+        if is_enabled is not None:
+            count_query = count_query.where(CrosspostingLink.is_enabled == is_enabled)
+        if telegram_channel_id:
+            count_query = count_query.where(CrosspostingLink.telegram_channel_id == telegram_channel_id)
+        if max_channel_id:
+            count_query = count_query.where(CrosspostingLink.max_channel_id == max_channel_id)
+        
+        count_result = await db.execute(count_query)
         total = count_result.scalar() or 0
 
         # Данные с пагинацией
