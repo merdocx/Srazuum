@@ -13,7 +13,7 @@ if settings.yookassa_shop_id and settings.yookassa_secret_key:
     Configuration.account_id = settings.yookassa_shop_id
     Configuration.secret_key = settings.yookassa_secret_key
 else:
-    logger.warning("yookassa_credentials_not_set", message="YooKassa credentials not configured")
+    logger.warning("YooKassa credentials not configured")
 
 
 def get_return_url() -> str:
