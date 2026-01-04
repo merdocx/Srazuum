@@ -183,5 +183,5 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
         return JSONResponse(status_code=status.HTTP_200_OK, content={"status": "ok"})
 
     except Exception as e:
-        logger.error("webhook_processing_error", error=str(e), exc_info=True)
+        logger.error(f"webhook_processing_error: {str(e)}", exc_info=True)
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": "Internal server error"})
