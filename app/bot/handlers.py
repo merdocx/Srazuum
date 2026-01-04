@@ -253,7 +253,7 @@ async def cmd_start(message: Message):
 
     text = (
         "Привет! Я помогу вам настроить кросспостинг из Telegram в MAX.\n\n"
-        "Используйте кнопку «✅ Добавить связь» для создания связи между каналами в Telegram и MAX.\n\n"
+        "Используйте кнопку «➕ Добавить связь» для создания связи между каналами в Telegram и MAX.\n\n"
         "Выберите действие:"
     )
 
@@ -267,7 +267,7 @@ async def cmd_help(message: Message):
     text = (
         "📖 Помощь по использованию бота:\n\n"
         "Используйте кнопки для управления кросспостингом:\n\n"
-        "✅ Добавить связь - Создать новую связь каналов\n"
+        "➕ Добавить связь - Создать новую связь каналов\n"
         "📋 Список связей - Просмотр всех ваших связей\n"
         "📊 Статус - Общая статистика кросспостинга\n"
         "⚙️ Настройки - Настройки бота\n\n"
@@ -285,7 +285,7 @@ async def message_help(message: Message):
     text = (
         "📖 Помощь по использованию бота:\n\n"
         "Используйте кнопки для управления кросспостингом:\n\n"
-        "✅ Добавить связь - Создать новую связь каналов\n"
+        "➕ Добавить связь - Создать новую связь каналов\n"
         "📋 Список связей - Просмотр всех ваших связей\n"
         "📊 Статус - Общая статистика кросспостинга\n\n"
         "Для управления конкретной связью:\n"
@@ -302,7 +302,7 @@ async def message_main_menu(message: Message, state: FSMContext):
     await state.clear()
     text = (
         "Привет! Я помогу вам настроить кросспостинг из Telegram в MAX.\n\n"
-        "Используйте кнопку «✅ Добавить связь» для создания связи между каналами в Telegram и MAX.\n\n"
+        "Используйте кнопку «➕ Добавить связь» для создания связи между каналами в Telegram и MAX.\n\n"
         "Выберите действие:"
     )
     await message.answer(text, reply_markup=get_main_keyboard())
@@ -380,7 +380,7 @@ async def cmd_add_channel(message: Message, state: FSMContext):
     logger.info("add_channel_started", user_id=message.from_user.id)
 
 
-@router.message(F.text == "✅ Добавить связь")
+@router.message(F.text == "➕ Добавить связь")
 async def message_add_channel(message: Message, state: FSMContext):
     """Обработчик кнопки добавления связи."""
     text = (
@@ -1046,7 +1046,7 @@ async def show_channels_list(message: Message, state: FSMContext = None, page: i
         links = result.scalars().all()
 
         if not links:
-            text = "У вас пока нет созданных связей. Используйте кнопку «✅ Добавить связь» для создания."
+            text = "У вас пока нет созданных связей. Используйте кнопку «➕ Добавить связь» для создания."
             await message.answer(text, reply_markup=get_back_to_menu_keyboard())
             return
 
