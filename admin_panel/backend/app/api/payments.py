@@ -13,7 +13,7 @@ from app.utils.logger import get_logger
 from app.core.database import get_db
 from app.models.shared import CrosspostingLink, User
 
-router = APIRouter(prefix="/payments", tags=["payments"])
+router = APIRouter(tags=["payments"])
 logger = get_logger(__name__)
 
 # Период подписки по умолчанию (в днях)
