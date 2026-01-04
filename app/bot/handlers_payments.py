@@ -150,6 +150,140 @@ async def cmd_my_subscriptions(message: Message, state: FSMContext):
         await message.answer(response, reply_markup=get_main_keyboard())
 
 
+async def process_pay_link(user_id: int, link_id: int, message_or_callback) -> bool:
+    """
+    Общая функция для обработки оплаты/продления связи.
+    
+    Args:
+        user_id: ID пользователя Telegram
+        link_id: ID связи
+        message_or_callback: Message или CallbackQuery объект
+    
+    Returns:
+        True если успешно, False если ошибка
+    """
+    async with async_session_maker() as session:
+        # Находим пользователя
+        result = await session.execute(select(User).where(User.telegram_user_id == user_id))
+        user = result.scalar_one_or_none()
+
+        if not user:
+            if hasattr(message_or_callback, 'answer'):
+                await message_or_callback.answer("❌ Пользователь не найден. Используйте /start для регистрации.")
+            return False
+
+        # Проверяем VIP статус
+        if user.is_vip:
+            if hasattr(message_or_callback, 'answer'):
+                await message_or_callback.answer(
+                    "⭐ Вы VIP пользователь!\n\n" "Все ваши связи активны бесплатно. Оплата не требуется.",
+                    reply_markup=get_main_keyboard(),
+                )
+            return False
+
+        # Находим связь
+        result = await session.execute(
+            select(CrosspostingLink).where(CrosspostingLink.id == link_id, CrosspostingLink.user_id == user.id)
+        )
+        link = result.scalar_one_or_none()
+
+        if not link:
+            if hasattr(message_or_callback, 'answer'):
+                await message_or_callback.answer(
+                    f"❌ Связь #{link_id} не найдена.\n\n"
+                    "Убедитесь, что вы указали правильный ID связи.\n"
+                    "Используйте /my_subscriptions для просмотра ваших связей."
+                )
+            return False
+
+        # Загружаем каналы для отображения
+        tg_result = await session.execute(select(TelegramChannel).where(TelegramChannel.id == link.telegram_channel_id))
+        tg_ch = tg_result.scalar_one_or_none()
+        max_result = await session.execute(select(MaxChannel).where(MaxChannel.id == link.max_channel_id))
+        max_ch = max_result.scalar_one_or_none()
+
+        # Создаем платеж
+        try:
+            loop = asyncio.get_event_loop()
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                payment_info = await loop.run_in_executor(executor, create_payment, link.id, user.id)
+
+            # Сохраняем информацию о платеже
+            link.yookassa_payment_id = payment_info["payment_id"]
+            link.payment_status = "pending"
+            await session.commit()
+
+            # Формируем информацию о продлении
+            current_end_date = link.subscription_end_date
+            now = datetime.utcnow()
+            if current_end_date and current_end_date > now:
+                new_end_date = current_end_date + timedelta(days=settings.subscription_period_days)
+                period_info = f"Текущее окончание: {current_end_date.strftime('%d.%m.%Y')}\nПосле оплаты подписка будет продлена до: {new_end_date.strftime('%d.%m.%Y')}"
+            else:
+                new_end_date = now + timedelta(days=settings.subscription_period_days)
+                period_info = f"После оплаты подписка будет активирована до: {new_end_date.strftime('%d.%m.%Y')}"
+
+            # Отправляем сообщение с ссылкой на оплату
+            payment_keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="💳 Оплатить подписку", url=payment_info["confirmation_url"])]]
+            )
+
+            tg_name = tg_ch.channel_username or tg_ch.channel_title if tg_ch else "N/A"
+            max_name = max_ch.channel_username or max_ch.channel_title if max_ch else "N/A"
+
+            answer_text = (
+                f"💳 Оплата подписки\n\n"
+                f"Связь: #{link.id}\n"
+                f"Telegram: {tg_name}\n"
+                f"MAX: {max_name}\n\n"
+                f"{period_info}\n\n"
+                f"Сумма: {payment_info['amount']:.0f} ₽\n"
+                f"Период: {settings.subscription_period_days} дней\n\n"
+                f"Нажмите кнопку ниже для оплаты:"
+            )
+
+            if hasattr(message_or_callback, 'message'):  # CallbackQuery
+                await message_or_callback.message.answer(answer_text, reply_markup=payment_keyboard)
+                await message_or_callback.answer()
+            else:  # Message
+                await message_or_callback.answer(answer_text, reply_markup=payment_keyboard)
+            
+            return True
+        except Exception as e:
+            logger.error("payment_creation_error", error=str(e), link_id=link.id, user_id=user.id)
+            if hasattr(message_or_callback, 'answer'):
+                await message_or_callback.answer(
+                    f"❌ Ошибка при создании платежа: {str(e)}\n\n" "Попробуйте позже или обратитесь в поддержку."
+                )
+            return False
+
+
+@router.callback_query(F.data.startswith("pay_link_"))
+async def callback_pay_link(callback: CallbackQuery, state: FSMContext):
+    """Обработчик callback-кнопки оплаты подписки."""
+    import re
+    match = re.search(r"pay_link_(\d+)", callback.data)
+    if not match:
+        await callback.answer("Ошибка: не удалось определить ID связи.", show_alert=True)
+        return
+    
+    link_id = int(match.group(1))
+    await process_pay_link(callback.from_user.id, link_id, callback)
+
+
+@router.callback_query(F.data.startswith("renew_link_"))
+async def callback_renew_link(callback: CallbackQuery, state: FSMContext):
+    """Обработчик callback-кнопки продления подписки (то же, что и оплата)."""
+    import re
+    match = re.search(r"renew_link_(\d+)", callback.data)
+    if not match:
+        await callback.answer("Ошибка: не удалось определить ID связи.", show_alert=True)
+        return
+    
+    link_id = int(match.group(1))
+    await process_pay_link(callback.from_user.id, link_id, callback)
+
+
 @router.message(Command("pay_link"))
 async def cmd_pay_link(message: Message, state: FSMContext):
     """Оплатить/продлить конкретную связь."""
