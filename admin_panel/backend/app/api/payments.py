@@ -149,8 +149,8 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
                         max_result = await db.execute(select(MaxChannel).where(MaxChannel.id == link.max_channel_id))
                         max_ch = max_result.scalar_one_or_none()
 
-                        tg_name = tg_ch.channel_username or tg_ch.channel_title if tg_ch else "N/A"
-                        max_name = max_ch.channel_username or max_ch.channel_title if max_ch else "N/A"
+                        tg_name = tg_ch.channel_title or tg_ch.channel_username if tg_ch else "N/A"
+                        max_name = max_ch.channel_title or max_ch.channel_username if max_ch else "N/A"
 
                         notification_text = (
                             f"✅ Платеж успешно обработан!\n\n"
@@ -158,7 +158,7 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
                             f"Telegram: {tg_name}\n"
                             f"MAX: {max_name}\n\n"
                             f"📅 Подписка продлена до: {new_end_date.strftime('%d.%m.%Y %H:%M')}\n\n"
-                            f"Кросспостинг активирован."
+                            f"✅ Кросспостинг активирован."
                         )
 
                         await bot.send_message(chat_id=user.telegram_user_id, text=notification_text)

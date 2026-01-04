@@ -48,7 +48,7 @@ async def show_migrate_links_list(message: Message, state: FSMContext):
             links = result.scalars().all()
 
             if not links:
-                text = "У вас нет созданных связей. Используйте кнопку «➕ Добавить связь» для создания."
+                text = "У вас нет созданных связей. Используйте кнопку «✅ Добавить связь» для создания."
                 await message.answer(text, reply_markup=get_back_to_menu_keyboard())
                 return
 

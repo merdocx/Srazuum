@@ -253,7 +253,7 @@ async def cmd_start(message: Message):
 
     text = (
         "Привет! Я помогу вам настроить кросспостинг из Telegram в MAX.\n\n"
-        "Используйте кнопку «➕ Добавить связь» для создания связи между каналами в Telegram и MAX.\n\n"
+        "Используйте кнопку «✅ Добавить связь» для создания связи между каналами в Telegram и MAX.\n\n"
         "Выберите действие:"
     )
 
@@ -267,7 +267,7 @@ async def cmd_help(message: Message):
     text = (
         "📖 Помощь по использованию бота:\n\n"
         "Используйте кнопки для управления кросспостингом:\n\n"
-        "➕ Добавить связь - Создать новую связь каналов\n"
+        "✅ Добавить связь - Создать новую связь каналов\n"
         "📋 Список связей - Просмотр всех ваших связей\n"
         "📊 Статус - Общая статистика кросспостинга\n"
         "⚙️ Настройки - Настройки бота\n\n"
@@ -285,7 +285,7 @@ async def message_help(message: Message):
     text = (
         "📖 Помощь по использованию бота:\n\n"
         "Используйте кнопки для управления кросспостингом:\n\n"
-        "➕ Добавить связь - Создать новую связь каналов\n"
+        "✅ Добавить связь - Создать новую связь каналов\n"
         "📋 Список связей - Просмотр всех ваших связей\n"
         "📊 Статус - Общая статистика кросспостинга\n\n"
         "Для управления конкретной связью:\n"
@@ -302,7 +302,7 @@ async def message_main_menu(message: Message, state: FSMContext):
     await state.clear()
     text = (
         "Привет! Я помогу вам настроить кросспостинг из Telegram в MAX.\n\n"
-        "Используйте кнопку «➕ Добавить связь» для создания связи между каналами в Telegram и MAX.\n\n"
+        "Используйте кнопку «✅ Добавить связь» для создания связи между каналами в Telegram и MAX.\n\n"
         "Выберите действие:"
     )
     await message.answer(text, reply_markup=get_main_keyboard())
@@ -380,7 +380,7 @@ async def cmd_add_channel(message: Message, state: FSMContext):
     logger.info("add_channel_started", user_id=message.from_user.id)
 
 
-@router.message(F.text == "➕ Добавить связь")
+@router.message(F.text == "✅ Добавить связь")
 async def message_add_channel(message: Message, state: FSMContext):
     """Обработчик кнопки добавления связи."""
     text = (
@@ -918,7 +918,7 @@ async def process_max_channel(message: Message, state: FSMContext):
                     f"Telegram: {telegram_channel.channel_username or telegram_channel.channel_title}\n"
                     f"MAX: {max_channel.channel_username or max_channel.channel_title}\n\n"
                     f"📅 Бесплатный период: до {free_trial_end}\n"
-                    f"Кросспостинг активирован.",
+                    f"✅ Кросспостинг активирован.",
                     reply_markup=get_main_keyboard(),
                 )
             else:
@@ -1046,7 +1046,7 @@ async def show_channels_list(message: Message, state: FSMContext = None, page: i
         links = result.scalars().all()
 
         if not links:
-            text = "У вас пока нет созданных связей. Используйте кнопку «➕ Добавить связь» для создания."
+            text = "У вас пока нет созданных связей. Используйте кнопку «✅ Добавить связь» для создания."
             await message.answer(text, reply_markup=get_back_to_menu_keyboard())
             return
 
@@ -1162,16 +1162,17 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
         }
         status_text = status_icons.get(link.subscription_status, link.subscription_status)
 
-        subscription_text = f"Статус: {status_text}\n"
+        subscription_type_text = ""
         if link.subscription_status == "vip":
-            subscription_text += "Тип: Бесплатная подписка (VIP)\n"
+            subscription_type_text = "VIP (бесплатно)"
         elif link.is_first_link:
-            subscription_text += "Тип: Первая связь (бесплатно)\n"
+            subscription_type_text = "Первая связь (бесплатно)"
         else:
-            subscription_text += "Тип: Платная подписка\n"
+            subscription_type_text = "Платная подписка"
 
         # Определяем дату окончания
         end_date = link.subscription_end_date or link.free_trial_end_date
+        subscription_details = ""
         if end_date:
             now = datetime.utcnow()
             if end_date > now:
@@ -1179,23 +1180,25 @@ async def show_link_detail(message: Message, state: FSMContext, link_id: int):
                 days = delta.days
                 hours = delta.seconds // 3600
                 if days > 0:
-                    subscription_text += f"Осталось: {days} дней\n"
+                    subscription_details = f"Осталось: {days} дней\n"
                 else:
-                    subscription_text += f"Осталось: {hours} часов\n"
-                subscription_text += f"Окончание: {end_date.strftime('%d.%m.%Y %H:%M')}\n"
+                    subscription_details = f"Осталось: {hours} часов\n"
+                subscription_details += f"Окончание: {end_date.strftime('%d.%m.%Y %H:%M')}\n"
             else:
                 delta = now - end_date
                 days = delta.days
-                subscription_text += f"Истекла {days} дней назад\n"
-                subscription_text += f"Окончание: {end_date.strftime('%d.%m.%Y %H:%M')}\n"
+                subscription_details = f"Истекла {days} дней назад\n"
+                subscription_details += f"Окончание: {end_date.strftime('%d.%m.%Y %H:%M')}\n"
 
         text = (
             f"{status_icon} Связь #{link.id}\n\n"
             f"Telegram: {link.telegram_channel.channel_title}\n"
             f"MAX: {link.max_channel.channel_title}\n"
             f"Статус: {'Активна' if link.is_enabled else 'Неактивна'}\n"
-            f"Создана: {link.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
-            f"📅 Подписка:\n{subscription_text}\n"
+            f"Создана: {link.created_at.strftime('%Y-%m-%d %H:%M')}\n"
+            f"Подписка: {status_text}\n"
+            f"Тип подписки: {subscription_type_text}\n"
+            f"{subscription_details}\n"
             f"📊 Статистика:\n"
             f"Успешных: {success_count.scalar() or 0}\n"
             f"Неудачных: {failed_count.scalar() or 0}"

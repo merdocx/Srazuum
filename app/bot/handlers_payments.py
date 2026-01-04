@@ -228,8 +228,8 @@ async def process_pay_link(user_id: int, link_id: int, message_or_callback) -> b
                 inline_keyboard=[[InlineKeyboardButton(text="💳 Оплатить подписку", url=payment_info["confirmation_url"])]]
             )
 
-            tg_name = tg_ch.channel_username or tg_ch.channel_title if tg_ch else "N/A"
-            max_name = max_ch.channel_username or max_ch.channel_title if max_ch else "N/A"
+            tg_name = tg_ch.channel_title or tg_ch.channel_username if tg_ch else "N/A"
+            max_name = max_ch.channel_title or max_ch.channel_username if max_ch else "N/A"
 
             answer_text = (
                 f"💳 Оплата подписки\n\n"
@@ -369,8 +369,8 @@ async def cmd_pay_link(message: Message, state: FSMContext):
                 inline_keyboard=[[InlineKeyboardButton(text="💳 Оплатить подписку", url=payment_info["confirmation_url"])]]
             )
 
-            tg_name = tg_ch.channel_username or tg_ch.channel_title if tg_ch else "N/A"
-            max_name = max_ch.channel_username or max_ch.channel_title if max_ch else "N/A"
+            tg_name = tg_ch.channel_title or tg_ch.channel_username if tg_ch else "N/A"
+            max_name = max_ch.channel_title or max_ch.channel_username if max_ch else "N/A"
 
             await message.answer(
                 f"💳 Оплата подписки\n\n"
