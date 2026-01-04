@@ -9,10 +9,10 @@ class Settings(BaseSettings):
     """Настройки приложения."""
 
     # Telegram
-    telegram_bot_token: str
-    telegram_api_id: str  # Будет преобразован в int при необходимости
-    telegram_api_hash: str
-    telegram_phone: str
+    telegram_bot_token: str = ""
+    telegram_api_id: str = ""  # Будет преобразован в int при необходимости
+    telegram_api_hash: str = ""
+    telegram_phone: str = ""
 
     @property
     def telegram_api_id_int(self) -> int:
@@ -20,7 +20,7 @@ class Settings(BaseSettings):
         return int(self.telegram_api_id)
 
     # MAX
-    max_bot_token: str
+    max_bot_token: str = ""
     max_api_base_url: str = "https://platform-api.max.ru"
 
     # Database
