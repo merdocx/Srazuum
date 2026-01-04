@@ -1867,10 +1867,11 @@ async def callback_migrate_link(callback: CallbackQuery, state: FSMContext):
         f"• В зависимости от количества постов перенос может занять некоторое время\n\n"
         f"⏳ Начинаю перенос, вы получите уведомление по окончании переноса"
     )
-    await callback.message.answer(start_text, reply_markup=get_stop_migration_keyboard())
+    start_message = await callback.message.answer(start_text, reply_markup=get_stop_migration_keyboard())
+    await state.update_data(migration_start_message_id=start_message.message_id)
 
     # Запускаем миграцию в фоне
-    asyncio.create_task(start_migration(link_id, callback.from_user.id, callback.message.chat.id))
+    asyncio.create_task(start_migration(link_id, callback.from_user.id, callback.message.chat.id, start_message.message_id))
 
 
 @router.callback_query(F.data == "migrate_dismiss")

@@ -115,9 +115,8 @@ async def message_migrate_link(message: Message, state: FSMContext):
 
         # Запускаем миграцию в фоне
         await state.set_state(MigrateStates.migrating)
-        await state.update_data(migrate_link_id=link_id)
-
-        # Отправляем уведомление о начале
+        
+        # Отправляем уведомление о начале и сохраняем message_id
         start_text = (
             f"⚠️ Начинается перенос старых постов\n\n"
             f"Telegram: {link.telegram_channel.channel_title}\n"
@@ -127,10 +126,12 @@ async def message_migrate_link(message: Message, state: FSMContext):
             f"• В зависимости от количества постов перенос может занять некоторое время\n\n"
             f"⏳ Начинаю перенос, вы получите уведомление по окончании переноса"
         )
-        await message.answer(start_text, reply_markup=get_stop_migration_keyboard())
+        start_message = await message.answer(start_text, reply_markup=get_stop_migration_keyboard())
+        
+        await state.update_data(migrate_link_id=link_id, migration_start_message_id=start_message.message_id)
 
         # Запускаем миграцию в фоне
-        asyncio.create_task(start_migration(link_id, message.from_user.id, message.chat.id))
+        asyncio.create_task(start_migration(link_id, message.from_user.id, message.chat.id, start_message.message_id))
 
 
 @router.message(F.text == "⏹ Остановить миграцию")
@@ -218,7 +219,7 @@ async def message_stop_migration(message: Message, state: FSMContext):
     logger.info("migration_stopped_by_user", link_id=link_id, user_id=user.id)
 
 
-async def start_migration(link_id: int, user_id: int, chat_id: int):
+async def start_migration(link_id: int, user_id: int, chat_id: int, start_message_id: Optional[int] = None):
     """
     Запустить миграцию постов в фоне.
 
@@ -226,6 +227,7 @@ async def start_migration(link_id: int, user_id: int, chat_id: int):
         link_id: ID связи для миграции
         user_id: ID пользователя Telegram
         chat_id: ID чата для отправки уведомлений
+        start_message_id: ID сообщения о начале миграции (для редактирования клавиатуры)
     """
     pyrogram_client = None
     bot = None
@@ -335,6 +337,14 @@ async def start_migration(link_id: int, user_id: int, chat_id: int):
         )
 
         try:
+            # Сначала редактируем клавиатуру исходного сообщения, если есть его ID
+            if start_message_id:
+                try:
+                    await bot.edit_message_reply_markup(chat_id=chat_id, message_id=start_message_id, reply_markup=None)
+                except Exception as edit_error:
+                    # Если не удалось отредактировать (например, сообщение было удалено), игнорируем ошибку
+                    logger.debug("failed_to_edit_start_message_keyboard", error=str(edit_error))
+            
             await bot.send_message(chat_id, final_text, reply_markup=get_main_keyboard())
             logger.info("migration_completed_notification_sent", link_id=link_id, result=result)
         except Exception as send_error:
@@ -355,6 +365,13 @@ async def start_migration(link_id: int, user_id: int, chat_id: int):
                 f"Попробуйте позже или обратитесь в поддержку."
             )
             try:
+                # Редактируем клавиатуру исходного сообщения, если есть его ID
+                if start_message_id:
+                    try:
+                        await bot.edit_message_reply_markup(chat_id=chat_id, message_id=start_message_id, reply_markup=None)
+                    except Exception:
+                        pass  # Игнорируем ошибку редактирования
+                
                 await bot.send_message(chat_id, error_text, reply_markup=get_main_keyboard())
             except Exception as send_error:
                 logger.error("failed_to_send_error_message", error=str(send_error))
