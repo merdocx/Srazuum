@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useQuery } from 'react-query'
+import { useQuery, useMutation, useQueryClient } from 'react-query'
 import { api } from '../services/api'
 import { User, PaginatedResponse } from '../types'
 import './UsersPage.css'
@@ -8,6 +8,7 @@ export default function UsersPage() {
   const [page, setPage] = useState(0)
   const [search, setSearch] = useState('')
   const limit = 50
+  const queryClient = useQueryClient()
 
   const { data, isLoading, error } = useQuery<PaginatedResponse<User>>(
     ['users', page, search],
@@ -70,6 +71,16 @@ export default function UsersPage() {
                 <td>{user.id}</td>
                 <td>{user.telegram_user_id}</td>
                 <td>{user.telegram_username || '-'}</td>
+                <td>
+                  <input
+                    type="checkbox"
+                    checked={user.is_vip || false}
+                    onChange={(e) => {
+                      updateVIPMutation.mutate({ userId: user.id, isVip: e.target.checked })
+                    }}
+                    disabled={updateVIPMutation.isLoading}
+                  />
+                </td>
                 <td>{user.channels_count || 0}</td>
                 <td>{user.links_count || 0}</td>
                 <td>{new Date(user.created_at).toLocaleString('ru-RU')}</td>

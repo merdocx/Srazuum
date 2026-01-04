@@ -53,6 +53,7 @@ export interface User {
   id: number
   telegram_user_id: number
   telegram_username?: string
+  is_vip?: boolean
   created_at: string
   updated_at: string
   channels_count?: number

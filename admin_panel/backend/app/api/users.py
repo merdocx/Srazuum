@@ -1,9 +1,10 @@
 """API для управления пользователями."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from typing import Optional
+from pydantic import BaseModel
 
 from app.utils.logger import get_logger
 from app.core.database import get_db
@@ -14,6 +15,10 @@ from app.models.shared import User, TelegramChannel, MaxChannel, CrosspostingLin
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+class UpdateVIPStatusRequest(BaseModel):
+    is_vip: bool
 
 
 @router.get("")
@@ -63,6 +68,7 @@ async def get_users(
                     "id": user.id,
                     "telegram_user_id": user.telegram_user_id,
                     "telegram_username": user.telegram_username,
+                    "is_vip": user.is_vip,
                     "created_at": user.created_at,
                     "updated_at": user.updated_at,
                     "channels_count": tg_count + max_count,
@@ -100,6 +106,7 @@ async def get_user(user_id: int, current_admin: Admin = Depends(get_current_admi
             "id": user.id,
             "telegram_user_id": user.telegram_user_id,
             "telegram_username": user.telegram_username,
+            "is_vip": user.is_vip,
             "created_at": user.created_at,
             "updated_at": user.updated_at,
             "telegram_channels": [
@@ -137,3 +144,33 @@ async def get_user(user_id: int, current_admin: Admin = Depends(get_current_admi
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка получения пользователя: {str(e)}")
+
+
+@router.patch("/{user_id}/vip")
+async def update_user_vip_status(
+    user_id: int,
+    request: UpdateVIPStatusRequest,
+    current_admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Обновить VIP статус пользователя."""
+    try:
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+
+        if not user:
+            raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+        user.is_vip = request.is_vip
+        await db.commit()
+        await db.refresh(user)
+
+        logger.info(f"user_vip_status_updated: user_id={user_id}, is_vip={request.is_vip}, admin_id={current_admin.id}")
+
+        return {"id": user.id, "telegram_user_id": user.telegram_user_id, "is_vip": user.is_vip}
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"error_updating_user_vip_status: user_id={user_id}, error={str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка обновления VIP статуса: {str(e)}")
