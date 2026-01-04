@@ -302,9 +302,12 @@ async def message_main_menu(message: Message, state: FSMContext):
     text = (
         "Привет! Я помогу вам настроить кросспостинг из Telegram в MAX.\n\n"
         "Используйте кнопку «➕ Добавить связь» для создания связи между каналами в Telegram и MAX.\n\n"
+        "📄 Документы:\n"
+        "• <a href='https://srazuum.ru/docs/privacy_policy.html'>Политика конфиденциальности</a>\n"
+        "• <a href='https://srazuum.ru/docs/terms_of_service.html'>Пользовательское соглашение</a>\n\n"
         "Выберите действие:"
     )
-    await message.answer(text, reply_markup=get_main_keyboard())
+    await message.answer(text, reply_markup=get_main_keyboard(), parse_mode=ParseMode.HTML)
     logger.info("main_menu_opened", user_id=message.from_user.id)
 
 
