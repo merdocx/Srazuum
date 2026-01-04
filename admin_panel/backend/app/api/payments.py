@@ -120,44 +120,52 @@ async def yookassa_webhook(request: Request, db: AsyncSession = Depends(get_db))
             if user:
                 try:
                     # Импортируем Bot и settings для отправки уведомления
+                    # Добавляем путь к основному приложению для импорта settings
+                    if str(_project_root) not in sys.path:
+                        sys.path.insert(0, str(_project_root))
+                    
                     from aiogram import Bot
                     from config.settings import settings as app_settings
                     
-                    bot = Bot(token=app_settings.telegram_bot_token)
-                    
-                    # Загружаем информацию о каналах для сообщения
-                    from app.models.shared import TelegramChannel, MaxChannel
-                    tg_result = await db.execute(select(TelegramChannel).where(TelegramChannel.id == link.telegram_channel_id))
-                    tg_ch = tg_result.scalar_one_or_none()
-                    max_result = await db.execute(select(MaxChannel).where(MaxChannel.id == link.max_channel_id))
-                    max_ch = max_result.scalar_one_or_none()
-                    
-                    tg_name = tg_ch.channel_username or tg_ch.channel_title if tg_ch else "N/A"
-                    max_name = max_ch.channel_username or max_ch.channel_title if max_ch else "N/A"
-                    
-                    notification_text = (
-                        f"✅ Платеж успешно обработан!\n\n"
-                        f"📊 Связь #{link.id}\n"
-                        f"Telegram: {tg_name}\n"
-                        f"MAX: {max_name}\n\n"
-                        f"📅 Подписка продлена до: {new_end_date.strftime('%d.%m.%Y %H:%M')}\n\n"
-                        f"Кросспостинг активирован."
-                    )
-                    
-                    await bot.send_message(chat_id=user.telegram_user_id, text=notification_text)
-                    await bot.session.close()
-                    
-                    logger.info(
-                        "payment_notification_sent",
-                        link_id=link.id,
-                        user_id=user.id,
-                        telegram_user_id=user.telegram_user_id,
-                    )
+                    if not app_settings.telegram_bot_token:
+                        logger.error("telegram_bot_token_not_configured", link_id=link.id, user_id=user.id)
+                    else:
+                        bot = Bot(token=app_settings.telegram_bot_token)
+                        
+                        # Загружаем информацию о каналах для сообщения
+                        from app.models.shared import TelegramChannel, MaxChannel
+                        tg_result = await db.execute(select(TelegramChannel).where(TelegramChannel.id == link.telegram_channel_id))
+                        tg_ch = tg_result.scalar_one_or_none()
+                        max_result = await db.execute(select(MaxChannel).where(MaxChannel.id == link.max_channel_id))
+                        max_ch = max_result.scalar_one_or_none()
+                        
+                        tg_name = tg_ch.channel_username or tg_ch.channel_title if tg_ch else "N/A"
+                        max_name = max_ch.channel_username or max_ch.channel_title if max_ch else "N/A"
+                        
+                        notification_text = (
+                            f"✅ Платеж успешно обработан!\n\n"
+                            f"📊 Связь #{link.id}\n"
+                            f"Telegram: {tg_name}\n"
+                            f"MAX: {max_name}\n\n"
+                            f"📅 Подписка продлена до: {new_end_date.strftime('%d.%m.%Y %H:%M')}\n\n"
+                            f"Кросспостинг активирован."
+                        )
+                        
+                        await bot.send_message(chat_id=user.telegram_user_id, text=notification_text)
+                        await bot.session.close()
+                        
+                        logger.info(
+                            "payment_notification_sent",
+                            link_id=link.id,
+                            user_id=user.id,
+                            telegram_user_id=user.telegram_user_id,
+                        )
                 except Exception as notify_error:
                     logger.error(
                         "failed_to_send_payment_notification",
                         link_id=link.id,
                         user_id=user.id if user else None,
+                        telegram_user_id=user.telegram_user_id if user else None,
                         error=str(notify_error),
                         exc_info=True,
                     )
