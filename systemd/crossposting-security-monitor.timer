@@ -1,0 +1,11 @@
+[Unit]
+Description=Crossposting Service - Security Monitor Timer
+Requires=crossposting-security-monitor.service
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

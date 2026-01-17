@@ -1,0 +1,16 @@
+[Unit]
+Description=Crossposting Service - Security Monitor
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/crossposting_service
+Environment="PATH=/root/crossposting_service/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/usr/bin/python3 /root/crossposting_service/scripts/security_monitor.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crossposting-security-monitor
+
+[Install]
+WantedBy=multi-user.target
