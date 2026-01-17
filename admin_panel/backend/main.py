@@ -70,7 +70,7 @@ instrumentator.instrument(app).expose(app, endpoint="/metrics")
 @app.get("/")
 async def root():
     """Корневой эндпоинт."""
-    return {"message": "Srazuum Admin Panel API", "version": "1.5.3", "docs": "/docs"}
+    return {"message": "Srazuum Admin Panel API", "version": "1.5.4", "docs": "/docs"}
 
 
 @app.get("/health")
